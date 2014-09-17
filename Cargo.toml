@@ -1,0 +1,9 @@
+[package]
+
+name = "rocksdb-rs"
+version = "0.0.1"
+authors = ["Dan Burkert <dan@danburkert.com>"]
+
+[lib]
+
+name = "rocksdb"
