@@ -1,3 +1,4 @@
+use ffi::*;
 use std::c_str::CString;
 use std::collections::HashMap;
 use std::path::posix::Path;
@@ -5,26 +6,11 @@ use std::ptr;
 use std::string;
 use std::vec;
 
-use ffi::*;
+use Table;
+use columnfamily::{ColumnFamily};
 use options::{DatabaseOptions, ColumnFamilyOptions, WriteOptions, ReadOptions};
 
 static DEFAULT_COLUMN_FAMILY: &'static str = "default";
-
-pub struct ColumnFamily {
-    handle: *mut rocksdb_column_family_handle_t
-}
-
-impl ColumnFamily {
-
-    /// An alternative to implementing drop. This allows the `Database`
-    /// implementation of drop to guarantee that all column families are
-    /// destroyed before the database is closed.
-    fn destroy(&mut self) {
-        unsafe {
-            rocksdb_column_family_handle_destroy(self.handle);
-        }
-    }
-}
 
 pub struct Database {
     database: *mut rocksdb_t,
@@ -87,7 +73,7 @@ impl Database {
                                            cf_options: HashMap<String, ColumnFamilyOptions>)
                                            -> Result<Database, String> {
         let num_cfs = cf_options.len();
-        let (cf_names, cf_options) = vec::unzip(cf_options.move_iter());
+        let (cf_names, cf_options) = vec::unzip(cf_options.into_iter());
 
         // Translate the column family names to a vec of c string pointers.
         let cf_c_names: Vec<CString> = cf_names.iter()
@@ -96,15 +82,13 @@ impl Database {
         let cf_c_name_ptrs: Vec<*const i8> = cf_c_names.iter()
                                                        .map(|cf_c_name| cf_c_name.as_ptr())
                                                        .collect();
-
         let cf_option_ptrs: Vec<*const rocksdb_options_t> =
             cf_options.iter()
                       .map(|option| option.options() as *const rocksdb_options_t)
                       .collect();
-
         let c_path = path.to_c_str();
-        let cf_ptrs: *mut *mut rocksdb_column_family_handle_t = &mut ptr::mut_null();
-        let mut error: *mut i8 = ptr::mut_null();
+        let cf_ptrs: *mut *mut rocksdb_column_family_handle_t = &mut ptr::null_mut();
+        let mut error: *mut i8 = ptr::null_mut();
         unsafe {
             let database = rocksdb_open_column_families(db_options.options() as *const rocksdb_options_t,
                                                         c_path.as_ptr(),
@@ -113,68 +97,45 @@ impl Database {
                                                         cf_option_ptrs.as_ptr(),
                                                         cf_ptrs,
                                                         &mut error);
-
             drop(c_path); // Ensure c-string path isn't dropped before the pointer is used
             drop(cf_c_names); // Ensure cf names are not dropped before the pointers are used
             drop(cf_options); // Ensure that options are not dropped before pointers are used
-            if error == ptr::mut_null() {
+            if error == ptr::null_mut() {
                 let column_families: HashMap<String, ColumnFamily> =
-                    cf_names.move_iter()
+                    cf_names.into_iter()
                             .enumerate()
-                            .map(|(i, cf_name)| (cf_name, ColumnFamily { handle: (*cf_ptrs).offset(i as int) } ))
+                            .map(|(i, cf_name)|
+                                 (cf_name,
+                                  ColumnFamily::create(database, (*cf_ptrs).offset(i as int))))
                             .collect();
-
                 Ok(Database { database: database, column_families: column_families })
             } else {
                 Err(string::raw::from_buf(error as *const u8))
             }
         }
     }
+}
 
-    pub fn put(&self,
-               options: &WriteOptions,
-               key: &[u8],
-               val: &[u8])
-               -> Result<(), String> {
-        let mut error: *mut i8 = ptr::mut_null();
-        unsafe {
-            rocksdb_put(self.database,
-                        options.options() as *const rocksdb_writeoptions_t,
-                        key.as_ptr() as *const i8, key.len() as u64,
-                        val.as_ptr() as *const i8, val.len() as u64,
-                        (&mut error) as *mut *mut i8);
+impl Table for Database {
 
-            if error == ptr::mut_null() {
-                Ok(())
-            } else {
-                Err(string::raw::from_buf(error as *const u8))
-            }
+    fn get(&self, options: &ReadOptions, key: &[u8]) -> Result<Option<Vec<u8>>, String> {
+        match self.column_families.find_equiv(&DEFAULT_COLUMN_FAMILY) {
+            Some(column_family) => column_family.get(options, key),
+            None => Err("No default column family for database.".to_string())
         }
     }
 
-    pub fn get(&self,
-               options: &ReadOptions,
-               key: &[u8])
-               -> Result<Option<Vec<u8>>, String> {
-        let mut error: *mut i8 = ptr::mut_null();
-        let mut val_len: u64 = 0;
-        unsafe {
-            let val = rocksdb_get(self.database,
-                                    options.options() as *const rocksdb_readoptions_t,
-                                    key.as_ptr() as *const i8, key.len() as u64,
-                                    (&mut val_len) as *mut u64,
-                                    (&mut error) as *mut *mut i8);
+    fn put(&self, options: &WriteOptions, key: &[u8], val: &[u8]) -> Result<(), String> {
+        match self.column_families.find_equiv(&DEFAULT_COLUMN_FAMILY) {
+            Some(column_family) => column_family.put(options, key, val),
+            None => Err("No default column family for database.".to_string())
+        }
+    }
 
-            if error == ptr::mut_null() {
-                if val == ptr::mut_null() {
-                    Ok(None)
-                } else {
-                    let vec = vec::raw::from_buf(val as *const u8, val_len as uint);
-                    Ok(Some(vec))
-                }
-            } else {
-                Err(string::raw::from_buf(error as *const u8))
-            }
+    fn delete(&self, options: &WriteOptions, key: &[u8]) -> Result<(), String> {
+        match self.column_families.find_equiv(&DEFAULT_COLUMN_FAMILY) {
+            Some(column_family) => column_family.delete(options, key),
+            None => Err("No default column family for database.".to_string())
         }
     }
 }
@@ -195,6 +156,7 @@ mod tests {
     use super::*;
     use options::{DatabaseOptions, ColumnFamilyOptions, ReadOptions, WriteOptions};
     use std::io::TempDir;
+    use Table;
 
     #[test]
     fn test_create_database() {
@@ -238,4 +200,21 @@ mod tests {
         assert!(table.get(&read_options, b"non-existant").unwrap().is_none());
         assert_eq!(table.get(&read_options, b"key").unwrap().unwrap(), b"val".to_vec());
     }
+
+    #[test]
+    fn test_comparator() {
+        let dir = TempDir::new("").unwrap();
+        let db_options = DatabaseOptions::new();
+        let cf_options = ColumnFamilyOptions::new();
+        let read_options = ReadOptions::new();
+        let write_options = WriteOptions::new();
+
+        let table = Database::create(dir.path(), db_options, cf_options).unwrap();
+        assert!(table.put(&write_options, b"key", b"val").is_ok());
+
+        assert!(table.get(&read_options, b"non-existant").unwrap().is_none());
+        assert_eq!(table.get(&read_options, b"key").unwrap().unwrap(), b"val".to_vec());
+
+    }
+
 }

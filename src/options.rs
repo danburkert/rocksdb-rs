@@ -4,6 +4,7 @@
 //! calls.
 
 use ffi::*;
+use comparator;
 
 /// Options to use when opening or creating a RocksDB database.
 pub struct DatabaseOptions {
@@ -77,6 +78,23 @@ impl ColumnFamilyOptions {
                                                memtable_size: u64)
                                                -> &mut ColumnFamilyOptions {
         unsafe { rocksdb_options_optimize_universal_style_compaction(self.options, memtable_size) };
+        self
+    }
+
+    /// Comparator used to define the order of keys in the table.
+    /// Default: a comparator that uses lexicographic byte-wise ordering
+    ///
+    /// REQUIRES: The client must ensure that the comparator supplied
+    /// here has the same name and orders keys *exactly* the same as the
+    /// comparator provided to previous open calls on the same DB.
+    pub fn set_comparator(&mut self,
+                          name: &str,
+                          compare: fn(&[u8], &[u8]) -> Ordering)
+                          -> &mut ColumnFamilyOptions {
+
+
+        let comparator = comparator::create(name, compare);
+        unsafe { rocksdb_options_set_comparator(self.options, comparator) };
         self
     }
 

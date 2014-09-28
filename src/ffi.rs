@@ -1,7 +1,6 @@
 #![allow(non_camel_case_types,dead_code)]
 
-use libc::{c_char, c_int, c_uint, c_double, c_uchar};
-use libc::types::os::arch::c95::size_t;
+use libc::{c_char, c_double, c_int, c_uchar, c_uint, c_void, size_t};
 
 #[repr(C)]
 pub struct rocksdb_t;
@@ -481,7 +480,16 @@ extern {
     pub fn rocksdb_options_set_inplace_update_num_locks(options: *mut rocksdb_options_t,
                                                         inplace_update_num_locks: size_t);
 
-
+    /* Comparator */
+    pub fn rocksdb_comparator_create(state: *mut c_void,
+                                     destructor: extern fn(*mut c_void),
+                                     comparator: extern fn(*mut c_void,
+                                                           *const c_char, size_t,
+                                                           *const c_char, size_t)
+                                     -> c_int,
+                                     name: extern fn(*mut c_void) -> *const c_char)
+                                     -> *mut rocksdb_comparator_t;
+    pub fn rocksdb_comparator_destroy(comparator: *mut rocksdb_comparator_t);
 
     /* Read options */
     pub fn rocksdb_readoptions_create() -> *mut rocksdb_readoptions_t;
