@@ -89,7 +89,7 @@ impl ColumnFamilyOptions {
     /// comparator provided to previous open calls on the same DB.
     pub fn set_comparator(&mut self,
                           name: &str,
-                          compare: fn(&[u8], &[u8]) -> Ordering)
+                          compare: |&[u8], &[u8]|: Sync -> Ordering)
                           -> &mut ColumnFamilyOptions {
 
 
@@ -246,5 +246,17 @@ mod tests {
         let mut options = ReadOptions::new();
         options.set_verify_checksums(false);
         options.set_fill_cache(true);
+    }
+
+    #[test]
+    fn test_set_comparator() {
+        let mut options = ColumnFamilyOptions::new();
+
+        let mut bytes: Vec<u8> = Vec::new();
+
+        options.set_comparator("foo", |x, y| {
+            bytes.push_all(x.clone());
+            y.cmp(&x)
+        });
     }
 }

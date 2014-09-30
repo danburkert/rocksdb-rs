@@ -5,17 +5,15 @@ use std::slice;
 
 use ffi::{rocksdb_comparator_create, rocksdb_comparator_t};
 
-struct Comparator {
+struct Comparator<'a> {
     name: CString,
-    compare: fn(&[u8], &[u8]) -> Ordering
+    compare: |&[u8], &[u8]|: Sync + 'a -> Ordering
 }
 
 pub fn create<'a>(name: &str,
-                  compare: fn(&[u8], &[u8]) -> Ordering)
+                  compare: |&[u8], &[u8]|: Sync + 'a -> Ordering)
                   -> *mut rocksdb_comparator_t {
-
     let comparator = box Comparator { name: name.to_c_str(), compare: compare };
-
     unsafe {
         rocksdb_comparator_create(mem::transmute(comparator),
                                   _destructor,
@@ -37,7 +35,7 @@ extern "C" fn _compare(state: *mut c_void,
     unsafe {
         slice::raw::buf_as_slice(a as *const u8, a_len as uint, |a_slice| {
             slice::raw::buf_as_slice(b as *const u8, b_len as uint, |b_slice| {
-                let x: &Comparator = &*(state as *mut Comparator);
+                let x: &mut Comparator = &mut *(state as *mut Comparator);
                 match (x.compare)(a_slice, b_slice) {
                     Less => -1,
                     Equal => 0,
