@@ -7,6 +7,7 @@ use std::string;
 use std::vec;
 
 use Table;
+use iterator::KeyValues;
 use columnfamily::{ColumnFamily};
 use options::{DatabaseOptions, ColumnFamilyOptions, WriteOptions, ReadOptions};
 
@@ -121,6 +122,13 @@ impl Table for Database {
     fn get(&self, options: &ReadOptions, key: &[u8]) -> Result<Option<Vec<u8>>, String> {
         match self.column_families.find_equiv(&DEFAULT_COLUMN_FAMILY) {
             Some(column_family) => column_family.get(options, key),
+            None => Err("No default column family for database.".to_string())
+        }
+    }
+
+    fn iter(&self, options: &ReadOptions) -> KeyValues {
+        match self.column_families.find_equiv(&DEFAULT_COLUMN_FAMILY) {
+            Some(column_family) => column_family.iter(options),
             None => Err("No default column family for database.".to_string())
         }
     }

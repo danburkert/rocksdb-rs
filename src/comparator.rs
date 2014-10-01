@@ -11,7 +11,7 @@ struct Comparator<'a> {
 }
 
 pub fn create<'a>(name: &str,
-                  compare: |&[u8], &[u8]|: Sync + 'a -> Ordering)
+                  compare: |&[u8], &[u8]|: Sync + Send -> Ordering)
                   -> *mut rocksdb_comparator_t {
     let comparator = box Comparator { name: name.to_c_str(), compare: compare };
     unsafe {

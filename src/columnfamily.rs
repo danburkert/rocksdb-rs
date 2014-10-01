@@ -1,5 +1,6 @@
 use std::{ptr, string, vec};
 use ffi::*;
+use iterator::KeyValues;
 
 use Table;
 use options::{ReadOptions, WriteOptions};
@@ -56,6 +57,14 @@ impl Table for ColumnFamily {
         }
     }
 
+    fn iter(&self, options: &ReadOptions) -> KeyValues {
+        let read_options = options.options() as *const rocksdb_readoptions_t;
+        let itr = unsafe {
+            rocksdb_create_iterator_cf(self.database, read_options, self.column_family)
+        };
+        KeyValues::new(itr)
+    }
+
     fn put(&self, options: &WriteOptions, key: &[u8], val: &[u8]) -> Result<(), String> {
         let mut error: *mut i8 = ptr::null_mut();
         unsafe {
@@ -88,4 +97,5 @@ impl Table for ColumnFamily {
             }
         }
     }
+
 }
