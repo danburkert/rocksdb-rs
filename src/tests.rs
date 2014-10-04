@@ -71,17 +71,17 @@ fn test_iterator() {
                    (b"5", b"5"),
                    (b"a", b"a"),
                    (b"b", b"b"),
-                   (b"c", b"c")
-                  );
+                   (b"c", b"c"),
+                   (b"fooz", b"baz"));
 
     for &(k, v) in kvs.iter() {
         cf.put(&write_options, k, v).unwrap();
     }
 
-    for kv in cf.iter(&read_options).unwrap() {
-        println!("key: {}, value: {}", String::from_utf8_lossy(kv.key), String::from_utf8_lossy(kv.value));
+    for (kv, tuple) in cf.iter(&read_options).unwrap().zip(kvs.iter()) {
+        assert!(kv.key[] == tuple.val0());
+        assert!(kv.value[] == tuple.val1());
     }
-    fail!()
 }
 
 #[test]
@@ -121,3 +121,43 @@ fn test_set_comparator() {
     });
 }
 
+#[test]
+fn test_comparator() {
+    let dir = TempDir::new("").unwrap();
+    let db_options = DatabaseOptions::new();
+    let mut cf_options = ColumnFamilyOptions::new();
+
+    cf_options.set_comparator("foo", |x, y| {
+        y.cmp(&x)
+    });
+
+    let cfs = vec!(("default".to_string(), cf_options)).into_iter().collect();
+    let mut read_options = ReadOptions::new();
+    read_options.set_verify_checksums(true);
+    read_options.set_fill_cache(false);
+    let write_options = WriteOptions::new();
+
+    let db = Database::create(dir.path(), db_options, cfs).unwrap();
+    let cf = db.get_column_family("default").unwrap();
+
+    let kvs = vec!(
+                   (b"1", b"1"),
+                   (b"2", b"2"),
+                   (b"3", b"3"),
+                   (b"4", b"4"),
+                   (b"5", b"5"));
+
+    for &(k, v) in kvs.iter() {
+        cf.put(&write_options, k, v).unwrap();
+    }
+
+    for kv in cf.iter(&read_options).unwrap() {
+        println!("comparing {}", kv);
+    }
+
+    for (kv, tuple) in cf.iter(&read_options).unwrap().zip(kvs.iter().rev()) {
+        println!("comparing {} to {}", kv, tuple);
+        assert!(kv.key[] == tuple.val0());
+        assert!(kv.value[] == tuple.val1());
+    }
+}
