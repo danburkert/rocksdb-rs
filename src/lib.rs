@@ -268,24 +268,24 @@ extern "C" fn destructor_callback(state: *mut c_void) {
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
 #[deriving(Show, PartialEq, Eq, PartialOrd, Ord)]
-pub struct KeyValue<'a> {
-    pub key: &'a [u8],
-    pub value: &'a [u8]
+pub struct KeyValue {
+    pub key: Vec<u8>,
+    pub value: Vec<u8>
 }
 
-pub struct KeyValues<'a> {
+pub struct KeyValues {
     itr: *mut rocksdb_iterator_t
 }
 
 #[unsafe_destructor]
-impl <'a> Drop for KeyValues<'a> {
+impl Drop for KeyValues {
     fn drop(&mut self) {
         unsafe { rocksdb_iter_destroy(self.itr) };
     }
 }
 
-impl <'a> KeyValues<'a> {
-    pub fn new(itr: *mut rocksdb_iterator_t) -> KeyValues<'a> {
+impl KeyValues {
+    pub fn new(itr: *mut rocksdb_iterator_t) -> KeyValues {
         unsafe { rocksdb_iter_seek_to_first(itr) };
         KeyValues { itr: itr }
     }
@@ -299,21 +299,20 @@ impl <'a> KeyValues<'a> {
     }
 }
 
-impl <'a> Iterator<KeyValue<'a>> for KeyValues<'a> {
-    fn next(&mut self) -> Option<KeyValue<'a>> {
+impl Iterator<KeyValue> for KeyValues {
+    fn next(&mut self) -> Option<KeyValue> {
         if unsafe { rocksdb_iter_valid(self.itr()) } == 0 {
             return None;
         }
 
-        let mut key_len: u64 = 0;
-        let mut val_len: u64 = 0;
+        let mut len: u64 = 0;
 
         unsafe {
-            let key_ptr = rocksdb_iter_key(self.itr(), &mut key_len) as *const u8;
-            let key = mem::transmute(raw::Slice { data: key_ptr, len: key_len as uint });
+            let key_ptr = rocksdb_iter_key(self.itr(), &mut len) as *mut u8;
+            let key = CVec::new(key_ptr, len as uint).as_slice().to_vec();
 
-            let val_ptr = rocksdb_iter_value(self.itr(), &mut val_len) as *const u8;
-            let val = mem::transmute(raw::Slice { data: val_ptr, len: val_len as uint });
+            let val_ptr = rocksdb_iter_value(self.itr(), &mut len) as *mut u8;
+            let val = CVec::new(val_ptr, len as uint).as_slice().to_vec();
 
             rocksdb_iter_next(self.itr_mut());
             Some(KeyValue { key: key, value: val })
