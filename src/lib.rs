@@ -8,24 +8,13 @@ use std::c_str::CString;
 use std::c_vec::CVec;
 use std::collections::HashMap;
 use std::path::posix::Path;
-use std::{mem, ptr, raw, slice, string, vec};
+use std::{mem, ptr, raw, slice, vec};
 
 use ffi::*;
 
 #[cfg(test)]
 mod tests;
 mod ffi;
-
-pub trait Table {
-
-    fn get(&self, options: &ReadOptions, key: &[u8]) -> Result<Option<Vec<u8>>, String>;
-
-    fn iter(&self, options: &ReadOptions) -> Result<KeyValues, String>;
-
-    fn put(&self, options: &WriteOptions, key: &[u8], val: &[u8]) -> Result<(), String>;
-
-    fn delete(&self, options: &WriteOptions, key: &[u8]) -> Result<(), String>;
-}
 
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -36,12 +25,12 @@ static _DEFAULT_COLUMN_FAMILY: &'static str = "default";
 
 pub struct Database {
     database: *mut rocksdb_t,
-    column_families: Option<HashMap<String, ColumnFamily>>
+    column_families: HashMap<String, ColumnFamily>
 }
 
 impl Drop for Database {
     fn drop(&mut self) {
-        self.column_families.take();
+        self.column_families.clear();
         unsafe { rocksdb_close(self.database); }
     }
 }
@@ -91,20 +80,16 @@ impl Database {
                                                        .collect();
         let cf_option_ptrs: Vec<*const rocksdb_options_t> =
             cf_options.iter().map(|option| option.options()).collect();
-        let c_path = path.to_c_str();
-        let cf_ptrs: *mut *mut rocksdb_column_family_handle_t = &mut ptr::null_mut();
+        let mut cf_ptrs: *mut rocksdb_column_family_handle_t = ptr::null_mut();
         let mut error: *mut i8 = ptr::null_mut();
         unsafe {
             let database = rocksdb_open_column_families(db_options.options(),
-                                                        c_path.as_ptr(),
+                                                        path.to_c_str().as_ptr(),
                                                         num_cfs as i32,
                                                         cf_c_name_ptrs.as_ptr(),
                                                         cf_option_ptrs.as_ptr(),
-                                                        cf_ptrs,
+                                                        &mut cf_ptrs,
                                                         &mut error);
-            drop(c_path); // Ensure c-string path isn't dropped before the pointer is used
-            drop(cf_c_names); // Ensure cf names are not dropped before the pointers are used
-            drop(cf_options); // Ensure that options are not dropped before pointers are used
             if error == ptr::null_mut() {
                 let column_families: HashMap<String, ColumnFamily> =
                     cf_names.into_iter()
@@ -112,21 +97,21 @@ impl Database {
                             .map(|(i, cf_name)|
                                  (cf_name,
                                   ColumnFamily { database: database,
-                                                 column_family: (*cf_ptrs).offset(i as int) }))
+                                                 column_family: cf_ptrs.offset(i as int) }))
                             .collect();
-                Ok(Database { database: database, column_families: Some(column_families) })
+                Ok(Database { database: database, column_families: column_families })
             } else {
-                Err(string::raw::from_buf(error as *const u8))
+                Err(CString::new(error as *const i8, true).to_string())
             }
         }
     }
 
     pub fn get_column_family<'a>(&'a self, column_family: &str) -> Option<&'a ColumnFamily> {
-        self.get_column_families().find_equiv(&column_family)
+        self.column_families.find_equiv(&column_family)
     }
 
     pub fn get_column_families(&self) -> &HashMap<String, ColumnFamily> {
-        self.column_families.as_ref().unwrap()
+        &self.column_families
     }
 }
 
@@ -149,7 +134,7 @@ impl Drop for ColumnFamily {
 
 impl ColumnFamily {
 
-    pub fn get(&self, options: &ReadOptions, key: &[u8]) -> Result<Option<Vec<u8>>, String> {
+    pub fn get(&self, options: &ReadOptions, key: &[u8]) -> Result<Option<CVec<u8>>, String> {
         let mut error: *mut i8 = ptr::null_mut();
         let mut val_len: u64 = 0;
         unsafe {
@@ -164,11 +149,13 @@ impl ColumnFamily {
                 if val == ptr::null_mut() {
                     Ok(None)
                 } else {
-                    let vec = vec::raw::from_buf(val as *const u8, val_len as uint);
+                    let vec = CVec::new_with_dtor(val as *mut u8,
+                                                  val_len as uint,
+                                                  proc() { libc::free(val as *mut libc::c_void) });
                     Ok(Some(vec))
                 }
             } else {
-                Err(string::raw::from_buf(error as *const u8))
+                Err(CString::new(error as *const i8, true).to_string())
             }
         }
     }
@@ -192,7 +179,7 @@ impl ColumnFamily {
             if error == ptr::null_mut() {
                 Ok(())
             } else {
-                Err(string::raw::from_buf(error as *const u8))
+                Err(CString::new(error as *const i8, true).to_string())
             }
         }
     }
@@ -208,7 +195,7 @@ impl ColumnFamily {
             if error == ptr::null_mut() {
                 Ok(())
             } else {
-                Err(string::raw::from_buf(error as *const u8))
+                Err(CString::new(error as *const i8, true).to_string())
             }
         }
     }
@@ -323,10 +310,11 @@ impl <'a> Iterator<KeyValue<'a>> for KeyValues<'a> {
 
         unsafe {
             let key_ptr = rocksdb_iter_key(self.itr(), &mut key_len) as *const u8;
-            let val_ptr = rocksdb_iter_value(self.itr(), &mut val_len) as *const u8;
-
             let key = mem::transmute(raw::Slice { data: key_ptr, len: key_len as uint });
+
+            let val_ptr = rocksdb_iter_value(self.itr(), &mut val_len) as *const u8;
             let val = mem::transmute(raw::Slice { data: val_ptr, len: val_len as uint });
+
             rocksdb_iter_next(self.itr_mut());
             Some(KeyValue { key: key, value: val })
         }

@@ -47,7 +47,7 @@ fn test_put_get() {
     assert!(cf.put(&write_options, b"key", b"val").is_ok());
 
     assert!(cf.get(&read_options, b"non-existant").unwrap().is_none());
-    assert_eq!(cf.get(&read_options, b"key").unwrap().unwrap(), b"val".to_vec());
+    assert_eq!(cf.get(&read_options, b"key").unwrap().unwrap().as_slice(), b"val");
 }
 
 #[test]
@@ -55,21 +55,28 @@ fn test_iterator() {
     let dir = TempDir::new("").unwrap();
     let db_options = DatabaseOptions::new();
     let cfs = vec!(("default".to_string(), ColumnFamilyOptions::new())).into_iter().collect();
-    let read_options = ReadOptions::new();
+    let mut read_options = ReadOptions::new();
+    read_options.set_verify_checksums(true);
+    read_options.set_fill_cache(false);
     let write_options = WriteOptions::new();
 
     let db = Database::create(dir.path(), db_options, cfs).unwrap();
     let cf = db.get_column_family("default").unwrap();
 
-
-    let kvs = vec!((b"key1", b"val1"),
-                   (b"key2", b"val2"),
-                   (b"key3", b"val3"));
+    let kvs = vec!(
+                   (b"1", b"1"),
+                   (b"2", b"2"),
+                   (b"3", b"3"),
+                   (b"4", b"4"),
+                   (b"5", b"5"),
+                   (b"a", b"a"),
+                   (b"b", b"b"),
+                   (b"c", b"c")
+                  );
 
     for &(k, v) in kvs.iter() {
         cf.put(&write_options, k, v).unwrap();
     }
-
 
     for kv in cf.iter(&read_options).unwrap() {
         println!("key: {}, value: {}", String::from_utf8_lossy(kv.key), String::from_utf8_lossy(kv.value));
