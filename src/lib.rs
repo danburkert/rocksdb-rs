@@ -1,9 +1,8 @@
-#![feature(globs, unsafe_destructor)]
+#![feature(phase, globs, unsafe_destructor, if_let)]
+#[phase(plugin, link)] extern crate log;
 extern crate libc;
 
-extern crate debug;
-
-use libc::{c_void, size_t};
+use libc::c_void;
 use std::c_str::CString;
 use std::c_vec::CVec;
 use std::collections::HashMap;
@@ -21,16 +20,16 @@ mod ffi;
 //// Database
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
-static _DEFAULT_COLUMN_FAMILY: &'static str = "default";
-
 pub struct Database {
     database: *mut rocksdb_t,
-    column_families: HashMap<String, ColumnFamily>
+    column_families: HashMap<String, ColumnFamily>,
+    _column_family_options: Vec<ColumnFamilyOptions>
 }
 
 impl Drop for Database {
     fn drop(&mut self) {
         self.column_families.clear();
+        debug!("Database::drop");
         unsafe { rocksdb_close(self.database); }
     }
 }
@@ -46,6 +45,7 @@ impl Database {
             let raw_db_opts = db_options.options_mut();
             rocksdb_options_set_error_if_exists(raw_db_opts, 1);
             rocksdb_options_set_create_if_missing(raw_db_opts, 1);
+            rocksdb_options_set_create_missing_column_families(raw_db_opts, 1);
         }
         Database::create_or_open(path, db_options, column_families)
     }
@@ -66,21 +66,23 @@ impl Database {
     /// Create or open a RocksDB database at the provided path with the specified column families.
     fn create_or_open(path: &Path,
                       db_options: DatabaseOptions,
-                      column_families: HashMap<String, ColumnFamilyOptions>)
+                      column_family_options: HashMap<String, ColumnFamilyOptions>)
                       -> Result<Database, String> {
-        let num_cfs = column_families.len();
-        let (cf_names, cf_options) = vec::unzip(column_families.into_iter());
+        let num_cfs = column_family_options.len();
+        debug!("num of column families: {}", num_cfs);
+        let (cf_names, cf_options) = vec::unzip(column_family_options.into_iter());
 
         // Translate the column family names to a vec of c string pointers.
         let cf_c_names: Vec<CString> = cf_names.iter()
                                                .map(|cf_name| cf_name.to_c_str())
                                                .collect();
-        let cf_c_name_ptrs: Vec<*const i8> = cf_c_names.iter()
-                                                       .map(|cf_c_name| cf_c_name.as_ptr())
-                                                       .collect();
-        let cf_option_ptrs: Vec<*const rocksdb_options_t> =
-            cf_options.iter().map(|option| option.options()).collect();
-        let mut cf_ptrs: *mut rocksdb_column_family_handle_t = ptr::null_mut();
+        let cf_c_name_ptrs = cf_c_names.iter()
+                                       .map(|cf_c_name| cf_c_name.as_ptr())
+                                       .collect::<Vec<_>>();
+        let cf_option_ptrs = cf_options.iter()
+                                       .map(|option| option.options())
+                                       .collect::<Vec<_>>();
+        let cf_ptrs: *mut *mut rocksdb_column_family_handle_t = &mut ptr::null_mut();
         let mut error: *mut i8 = ptr::null_mut();
         unsafe {
             let database = rocksdb_open_column_families(db_options.options(),
@@ -88,7 +90,7 @@ impl Database {
                                                         num_cfs as i32,
                                                         cf_c_name_ptrs.as_ptr(),
                                                         cf_option_ptrs.as_ptr(),
-                                                        &mut cf_ptrs,
+                                                        cf_ptrs,
                                                         &mut error);
             if error == ptr::null_mut() {
                 let column_families: HashMap<String, ColumnFamily> =
@@ -97,9 +99,11 @@ impl Database {
                             .map(|(i, cf_name)|
                                  (cf_name,
                                   ColumnFamily { database: database,
-                                                 column_family: cf_ptrs.offset(i as int) }))
+                                                 column_family: *cf_ptrs.offset(i as int) }))
                             .collect();
-                Ok(Database { database: database, column_families: column_families })
+                Ok(Database { database: database,
+                              column_families: column_families,
+                              _column_family_options: cf_options })
             } else {
                 Err(CString::new(error as *const i8, true).to_string())
             }
@@ -121,14 +125,13 @@ impl Database {
 
 pub struct ColumnFamily {
     database: *mut rocksdb_t,
-    column_family: *mut rocksdb_column_family_handle_t
+    column_family: *mut rocksdb_column_family_handle_t,
 }
 
 impl Drop for ColumnFamily {
     fn drop(&mut self) {
-        unsafe {
-            rocksdb_column_family_handle_destroy(self.column_family);
-        }
+        debug!("ColumnFamily::drop");
+        unsafe { rocksdb_column_family_handle_destroy(self.column_family) }
     }
 }
 
@@ -199,6 +202,23 @@ impl ColumnFamily {
             }
         }
     }
+
+    pub fn merge(&self, options: &WriteOptions, key: &[u8], val: &[u8]) -> Result<(), String> {
+        let mut error: *mut i8 = ptr::null_mut();
+        unsafe {
+            rocksdb_merge_cf(self.database,
+                             options.options(),
+                             self.column_family,
+                             key.as_ptr() as *const i8, key.len() as u64,
+                             val.as_ptr() as *const i8, val.len() as u64,
+                             (&mut error) as *mut *mut i8);
+            if error == ptr::null_mut() {
+                Ok(())
+            } else {
+                Err(CString::new(error as *const i8, true).to_string())
+            }
+        }
+    }
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -216,6 +236,7 @@ struct Comparator {
 
 impl Drop for Comparator {
     fn drop(&mut self) {
+        debug!("Comparator::drop");
         unsafe { rocksdb_comparator_destroy(self.comparator) }
     }
 }
@@ -225,24 +246,24 @@ impl Comparator {
         let state = box ComparatorState { name: name.to_c_str(), compare: compare };
         let comparator = unsafe {
             rocksdb_comparator_create(mem::transmute(state),
-                                      destructor_callback,
+                                      comparator_destructor_callback,
                                       compare_callback,
-                                      name_callback)
+                                      comparator_name_callback)
         };
         Comparator { comparator: comparator }
     }
 }
 
 /// Callback that rocksdb will execute in order to get the name of the comparator.
-extern "C" fn name_callback(state: *mut c_void) -> *const i8 {
-     let x: &ComparatorState = unsafe { &*(state as *mut ComparatorState) };
-     x.name.as_ptr()
+extern "C" fn comparator_name_callback(state: *mut c_void) -> *const i8 {
+     let state: &ComparatorState = unsafe { &*(state as *mut ComparatorState) };
+     state.name.as_ptr()
 }
 
 /// Callback that rocksdb will execute to compare keys.
 extern "C" fn compare_callback(state: *mut c_void,
-                       a: *const i8, a_len: size_t,
-                       b: *const i8, b_len: size_t) -> i32 {
+                               a: *const i8, a_len: u64,
+                               b: *const i8, b_len: u64) -> i32 {
     unsafe {
         slice::raw::buf_as_slice(a as *const u8, a_len as uint, |a_slice| {
             slice::raw::buf_as_slice(b as *const u8, b_len as uint, |b_slice| {
@@ -258,9 +279,162 @@ extern "C" fn compare_callback(state: *mut c_void,
 }
 
 /// Callback that rocksdb will execute to destroy the comparator.
-extern "C" fn destructor_callback(state: *mut c_void) {
+extern "C" fn comparator_destructor_callback(state: *mut c_void) {
     // Convert back to a box and let destructor reclaim
     let _: Box<ComparatorState> = unsafe {mem::transmute(state)};
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+//// Merge Operator
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+struct MergeOperatorState {
+    name: CString,
+    full_merge: |&[u8], Option<&[u8]>, Vec<&[u8]>|: Sync + Send -> Option<Vec<u8>>,
+    partial_merge: |&[u8], Vec<&[u8]>|: Sync + Send -> Option<Vec<u8>>
+}
+
+struct MergeOperator {
+    merge_operator: *mut rocksdb_mergeoperator_t
+}
+
+impl Drop for MergeOperator {
+    fn drop(&mut self) {
+        debug!("MergeOperator::drop");
+        // See https://github.com/facebook/rocksdb/issues/343
+        // unsafe { rocksdb_mergeoperator_destroy(self.merge_operator) }
+    }
+}
+
+impl MergeOperator {
+    fn new(name: &str,
+           full_merge: |&[u8], Option<&[u8]>, Vec<&[u8]>|: Sync + Send -> Option<Vec<u8>>,
+           partial_merge: |&[u8], Vec<&[u8]>|: Sync + Send -> Option<Vec<u8>>)
+           -> MergeOperator {
+        let state = box MergeOperatorState { name: name.to_c_str(),
+                                             full_merge: full_merge,
+                                             partial_merge: partial_merge };
+        let merge_operator = unsafe {
+            rocksdb_mergeoperator_create(mem::transmute(state),
+                                         merge_operator_destructor_callback,
+                                         full_merge_callback,
+                                         partial_merge_callback,
+                                         merge_operator_delete_callback,
+                                         merge_operator_name_callback)
+        };
+        MergeOperator { merge_operator: merge_operator }
+    }
+}
+
+/// Callback that rocksdb will execute in order to get the name of the merge operator.
+extern "C" fn merge_operator_name_callback(state: *mut c_void) -> *const i8 {
+     let x: &MergeOperatorState = unsafe { &*(state as *mut MergeOperatorState) };
+     x.name.as_ptr()
+}
+
+/// Callback that rocksdb will execute to perform a full merge.
+extern "C" fn full_merge_callback(state: *mut c_void,
+                                  key: *const i8, key_len: u64,
+                                  existing_val: *const i8, existing_val_len: u64,
+                                  operands: *const *const i8, operand_lens: *const u64,
+                                  num_operands: i32,
+                                  success: *mut u8, len: *mut u64)
+                                  -> *mut i8 {
+    unsafe {
+        slice::raw::buf_as_slice(key as *const u8, key_len as uint, |key| {
+            buf_as_optional_slice(existing_val as *const u8, existing_val_len as uint, |existing_val| {
+                bufs_as_slices(operands as *const *const u8, operand_lens, num_operands as uint, |operands| {
+                    let state: &mut MergeOperatorState = &mut *(state as *mut MergeOperatorState);
+                    match (state.full_merge)(key, existing_val, operands) {
+                        Some(mut val) => {
+                            let ptr = val.as_mut_ptr();
+                            *len = val.len() as u64;
+                            *success = 1;
+                            mem::forget(val);
+                            ptr as *mut i8
+                        }
+                        None => {
+                            *success = 0;
+                            ptr::null_mut()
+                        }
+                    }
+                })
+            })
+        })
+    }
+}
+
+/// Callback that rocksdb will execute to perform a partial merge.
+extern "C" fn partial_merge_callback(state: *mut c_void,
+                                     key: *const i8, key_len: u64,
+                                     operands: *const *const i8, operand_lens: *const u64,
+                                     num_operands: i32,
+                                     success: *mut u8, len: *mut u64)
+                                     -> *mut i8 {
+    unsafe {
+        slice::raw::buf_as_slice(key as *const u8, key_len as uint, |key| {
+            bufs_as_slices(operands as *const *const u8, operand_lens, num_operands as uint, |operands| {
+                let state: &mut MergeOperatorState = &mut *(state as *mut MergeOperatorState);
+                match (state.partial_merge)(key, operands) {
+                    Some(mut val) => {
+                        val.shrink_to_fit();
+                        let ptr = val.as_mut_ptr();
+                        *len = val.len() as u64;
+                        *success = 1;
+                        mem::forget(val);
+                        ptr as *mut i8
+                    }
+                    None => {
+                        *len = 0;
+                        *success = 0;
+                        ptr::null_mut()
+                    }
+                }
+            })
+        })
+    }
+}
+
+/// Callback that rocksdb will execute to  the result of a merge.
+extern "C" fn merge_operator_delete_callback(_state: *mut c_void,
+                                             val: *const i8, val_len: u64) {
+    let _ = unsafe { Vec::from_raw_parts(val_len as uint, val_len as uint, val as *mut u8) };
+}
+
+/// Callback that rocksdb will execute to destroy the merge operator.
+extern "C" fn merge_operator_destructor_callback(state: *mut c_void) {
+    // Convert back to a box and let destructor reclaim
+    let _: Box<MergeOperatorState> = unsafe {mem::transmute(state)};
+}
+
+unsafe fn bufs_as_slices<T, U>(ptrs: *const *const T,
+                               lens: *const u64,
+                               num: uint,
+                               f: |Vec<&[T]>| -> U)
+                               -> U {
+    let mut bufs = Vec::with_capacity(num);
+    for i in range(0, num) {
+        let slice = raw::Slice { data: *ptrs.offset(i as int), len: *lens.offset(i as int) as uint };
+        bufs.push(mem::transmute(slice))
+    }
+
+    f(bufs)
+}
+
+/**
+ * Form a slice from a pointer and length (as a number of units,
+ * not bytes).
+ */
+#[inline]
+pub unsafe fn buf_as_optional_slice<T,U>(p: *const T,
+                                         len: uint,
+                                         f: |v: Option<&[T]>| -> U) -> U {
+    if p == ptr::null() {
+        f(None)
+    } else {
+        let slice = raw::Slice { data: p, len: len };
+        f(Some(mem::transmute(slice)))
+    }
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -280,7 +454,8 @@ pub struct KeyValues {
 #[unsafe_destructor]
 impl Drop for KeyValues {
     fn drop(&mut self) {
-        unsafe { rocksdb_iter_destroy(self.itr) };
+        debug!("KeyValues::drop");
+        unsafe { rocksdb_iter_destroy(self.itr) }
     }
 }
 
@@ -331,7 +506,8 @@ pub struct DatabaseOptions {
 
 impl Drop for DatabaseOptions {
   fn drop(&mut self) {
-    unsafe { rocksdb_options_destroy(self.options); }
+    debug!("DatabaseOptions::drop");
+    unsafe { rocksdb_options_destroy(self.options) }
   }
 }
 
@@ -375,13 +551,15 @@ impl DatabaseOptions {
 /// Options for opening or creating a column family in a RocksDB database.
 pub struct ColumnFamilyOptions {
     options: *mut rocksdb_options_t,
-    comparator: Option<Comparator>
+    comparator: Option<Comparator>,
+    merge_operator: Option<MergeOperator>
 }
 
 impl Drop for ColumnFamilyOptions {
-  fn drop(&mut self) {
-    unsafe { rocksdb_options_destroy(self.options); }
-  }
+    fn drop(&mut self) {
+        debug!("ColumnFamilyOptions::drop");
+        unsafe { rocksdb_options_destroy(self.options) }
+    }
 }
 
 impl ColumnFamilyOptions {
@@ -390,7 +568,7 @@ impl ColumnFamilyOptions {
     /// or creating a column family.
     pub fn new() -> ColumnFamilyOptions {
         let options = unsafe { rocksdb_options_create() };
-        ColumnFamilyOptions { options: options, comparator: None }
+        ColumnFamilyOptions { options: options, comparator: None, merge_operator: None }
     }
 
     /// Configure the column family to use level-style compaction with a memtable of size
@@ -424,6 +602,27 @@ impl ColumnFamilyOptions {
         let comparator = Comparator::new(name, compare);
         unsafe { rocksdb_options_set_comparator(self.options, comparator.comparator) };
         self.comparator = Some(comparator);
+        self
+    }
+
+    /// REQUIRES: The client must provide a merge operator if Merge operation
+    /// needs to be accessed. Calling Merge on a DB without a merge operator
+    /// would result in Status::NotSupported. The client must ensure that the
+    /// merge operator supplied here has the same name and *exactly* the same
+    /// semantics as the merge operator provided to previous open calls on
+    /// the same DB. The only exception is reserved for upgrade, where a DB
+    /// previously without a merge operator is introduced to Merge operation
+    /// for the first time. It's necessary to specify a merge operator when
+    /// openning the DB in this case.
+    /// Default: nullptr
+    pub fn set_merge_operator(&mut self,
+                              name: &str,
+                              full_merge: |&[u8], Option<&[u8]>, Vec<&[u8]>|: Sync + Send -> Option<Vec<u8>>,
+                              partial_merge: |&[u8], Vec<&[u8]>|: Sync + Send -> Option<Vec<u8>>)
+                              -> &mut ColumnFamilyOptions {
+        let merge_operator = MergeOperator::new(name, full_merge, partial_merge);
+        unsafe { rocksdb_options_set_merge_operator(self.options, merge_operator.merge_operator) };
+        self.merge_operator = Some(merge_operator);
         self
     }
 

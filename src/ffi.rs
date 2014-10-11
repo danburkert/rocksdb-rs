@@ -486,10 +486,32 @@ extern {
                                      comparator: extern fn(*mut c_void,
                                                            *const c_char, size_t,
                                                            *const c_char, size_t)
-                                     -> c_int,
+                                                           -> c_int,
                                      name: extern fn(*mut c_void) -> *const c_char)
                                      -> *mut rocksdb_comparator_t;
     pub fn rocksdb_comparator_destroy(comparator: *mut rocksdb_comparator_t);
+
+    /* Merge Operator */
+    pub fn rocksdb_mergeoperator_create(state: *mut c_void,
+                                        destructor: extern fn(*mut c_void),
+                                        full_merge: extern fn(*mut c_void,                         // state
+                                                              *const c_char, size_t,               // key
+                                                              *const c_char, size_t,               // existing value
+                                                              *const *const c_char, *const size_t, // operand list
+                                                              c_int,                               // number of operands
+                                                              *mut c_uchar, *mut size_t)           // success, result length
+                                                              -> *mut c_char,                      // result
+                                        partial_merge: extern fn(*mut c_void,                         // state
+                                                                 *const c_char, size_t,               // key
+                                                                 *const *const c_char, *const size_t, // operand list
+                                                                 c_int,                               // number of operands
+                                                                 *mut c_uchar, *mut size_t)           // success, result length
+                                                                 -> *mut c_char,                      // result
+                                        delete_value: extern fn(*mut c_void,
+                                                                *const c_char, size_t),
+                                        name: extern fn(*mut c_void) -> *const c_char)
+                                        -> *mut rocksdb_mergeoperator_t;
+    pub fn rocksdb_mergeoperator_destroy(operator: *mut rocksdb_mergeoperator_t);
 
     /* Read options */
     pub fn rocksdb_readoptions_create() -> *mut rocksdb_readoptions_t;
