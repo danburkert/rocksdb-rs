@@ -10,12 +10,12 @@ use std::path::posix::Path;
 use std::{mem, ptr, raw, slice, vec};
 
 use ffi::*;
+pub use merge::{AssociativeMergeOperator, MergeOperator, Operands};
 
 #[cfg(test)]
 mod tests;
 mod ffi;
 mod merge;
-
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 //// Database
@@ -256,15 +256,15 @@ impl Comparator {
 }
 
 /// Callback that rocksdb will execute in order to get the name of the comparator.
-extern "C" fn comparator_name_callback(state: *mut c_void) -> *const i8 {
+extern fn comparator_name_callback(state: *mut c_void) -> *const i8 {
      let state: &ComparatorState = unsafe { &*(state as *mut ComparatorState) };
      state.name.as_ptr()
 }
 
 /// Callback that rocksdb will execute to compare keys.
-extern "C" fn compare_callback(state: *mut c_void,
-                               a: *const i8, a_len: u64,
-                               b: *const i8, b_len: u64) -> i32 {
+extern fn compare_callback(state: *mut c_void,
+                           a: *const i8, a_len: u64,
+                           b: *const i8, b_len: u64) -> i32 {
     unsafe {
         slice::raw::buf_as_slice(a as *const u8, a_len as uint, |a_slice| {
             slice::raw::buf_as_slice(b as *const u8, b_len as uint, |b_slice| {
@@ -280,7 +280,7 @@ extern "C" fn compare_callback(state: *mut c_void,
 }
 
 /// Callback that rocksdb will execute to destroy the comparator.
-extern "C" fn comparator_destructor_callback(state: *mut c_void) {
+extern fn comparator_destructor_callback(state: *mut c_void) {
     // Convert back to a box and let destructor reclaim
     let _: Box<ComparatorState> = unsafe {mem::transmute(state)};
 }
@@ -288,50 +288,6 @@ extern "C" fn comparator_destructor_callback(state: *mut c_void) {
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 //// Merge Operator
 ///////////////////////////////////////////////////////////////////////////////////////////////////
-
-/// The Merge Operator
-///
-/// Essentially, a MergeOperator specifies the semantics of a merge, which only client knows.
-/// It could be numeric addition, list append, string concatenation, edit data structure, ...,
-/// anything.  The library, on the other hand, is concerned with the exercise of this interface, at
-/// the right time (during get, iteration, compaction...).
-pub trait MergeOperator : Sync + Send {
-
-    /// Gives the client a way to express single-key read -> modify -> write semantics.
-    ///
-    /// * key: The key that's associated with this merge operation. Client could multiplex the merge
-    /// operator based on it if the key space is partitioned and different subspaces refer to
-    /// different types of data which have different merge operation semantics.
-    /// * existing_val: The value existing at the key prior to executing this merge.
-    /// * operands: The sequence of merge operations to apply, front first.
-    ///
-    /// All values passed in will be client-specific values. So if this method returns false, it is
-    /// because client specified bad data or there was internal corruption. This will be treated as
-    /// an error by the library.
-    fn full_merge(&self,
-                  key: &[u8],
-                  existing_val: Option<&[u8]>,
-                  operands: Vec<&[u8]>)
-                  -> Option<Vec<u8>>;
-
-    /// This function performs merge when all the operands are themselves merge operation types that
-    /// you would have passed to a ColumnFamily::merge call in the same order (front first).
-    /// (i.e. `ColumnFamily::merge(key, operands[0])`, followed by
-    /// `ColumnFamily::merge(key, operands[1])`, `...`)
-    ///
-    /// `partial_merge` should combine the operands into a single merge operation. The returned
-    /// operand should be constructed such that a call to `ColumnFamily::Merge(key, new_operand)`
-    /// would yield the same result as individual calls to `ColumnFamily::Merge(key, operand)` for
-    /// each operand in `operands` from front to back.
-    ///
-    /// `partial_merge` will be called only when the list of operands are long enough. The minimum
-    /// number of operands that will be passed to the function is specified by the
-    /// `ColumnFamilyOptions::min_partial_merge_operands` option.
-    fn partial_merge(&self,
-                     key: &[u8],
-                     operands: Vec<&[u8]>)
-                     -> Option<Vec<u8>>;
-}
 
 struct MergeOperatorState {
     name: CString,
@@ -370,22 +326,22 @@ extern fn full_merge_callback(state: *mut c_void,
     unsafe {
         slice::raw::buf_as_slice(key as *const u8, key_len as uint, |key| {
             buf_as_optional_slice(existing_val as *const u8, existing_val_len as uint, |existing_val| {
-                bufs_as_slices(operands as *const *const u8, operand_lens, num_operands as uint, |operands| {
-                    let state: &mut MergeOperatorState = &mut *(state as *mut MergeOperatorState);
-                    match (*state.merge_operator).full_merge(key, existing_val, operands) {
-                        Some(mut val) => {
-                            let ptr = val.as_mut_ptr();
-                            *len = val.len() as u64;
-                            *success = 1;
-                            mem::forget(val);
-                            ptr as *mut i8
-                        }
-                        None => {
-                            *success = 0;
-                            ptr::null_mut()
-                        }
+                let operands = Operands::new(operands as *const *const u8, operand_lens, num_operands as uint);
+                let state: &mut MergeOperatorState = &mut *(state as *mut MergeOperatorState);
+                match (*state.merge_operator).full_merge(key, existing_val, operands) {
+                    Some(mut val) => {
+                        val.shrink_to_fit();
+                        let ptr = val.as_mut_ptr();
+                        *len = val.len() as u64;
+                        *success = 1;
+                        mem::forget(val);
+                        ptr as *mut i8
                     }
-                })
+                    None => {
+                        *success = 0;
+                        ptr::null_mut()
+                    }
+                }
             })
         })
     }
@@ -400,52 +356,37 @@ extern fn partial_merge_callback(state: *mut c_void,
                                  -> *mut i8 {
     unsafe {
         slice::raw::buf_as_slice(key as *const u8, key_len as uint, |key| {
-            bufs_as_slices(operands as *const *const u8, operand_lens, num_operands as uint, |operands| {
-                let state: &mut MergeOperatorState = &mut *(state as *mut MergeOperatorState);
-                match (*state.merge_operator).partial_merge(key, operands) {
-                    Some(mut val) => {
-                        val.shrink_to_fit();
-                        let ptr = val.as_mut_ptr();
-                        *len = val.len() as u64;
-                        *success = 1;
-                        mem::forget(val);
-                        ptr as *mut i8
-                    }
-                    None => {
-                        *len = 0;
-                        *success = 0;
-                        ptr::null_mut()
-                    }
+            let operands = Operands::new(operands as *const *const u8, operand_lens, num_operands as uint);
+            let state: &mut MergeOperatorState = &mut *(state as *mut MergeOperatorState);
+            match (*state.merge_operator).partial_merge(key, operands) {
+                Some(mut val) => {
+                    val.shrink_to_fit();
+                    let ptr = val.as_mut_ptr();
+                    *len = val.len() as u64;
+                    *success = 1;
+                    mem::forget(val);
+                    ptr as *mut i8
                 }
-            })
+                None => {
+                    *len = 0;
+                    *success = 0;
+                    ptr::null_mut()
+                }
+            }
         })
     }
 }
 
 /// Callback that rocksdb will execute to  the result of a merge.
-extern "C" fn merge_operator_delete_callback(_state: *mut c_void,
+extern fn merge_operator_delete_callback(_state: *mut c_void,
                                              val: *const i8, val_len: u64) {
     let _ = unsafe { Vec::from_raw_parts(val_len as uint, val_len as uint, val as *mut u8) };
 }
 
 /// Callback that rocksdb will execute to destroy the merge operator.
-extern "C" fn merge_operator_destructor_callback(state: *mut c_void) {
+extern fn merge_operator_destructor_callback(state: *mut c_void) {
     // Convert back to a box and let destructor reclaim
     let _: Box<MergeOperatorState> = unsafe {mem::transmute(state)};
-}
-
-unsafe fn bufs_as_slices<T, U>(ptrs: *const *const T,
-                               lens: *const u64,
-                               num: uint,
-                               f: |Vec<&[T]>| -> U)
-                               -> U {
-    let mut bufs = Vec::with_capacity(num);
-    for i in range(0, num) {
-        let slice = raw::Slice { data: *ptrs.offset(i as int), len: *lens.offset(i as int) as uint };
-        bufs.push(mem::transmute(slice))
-    }
-
-    f(bufs)
 }
 
 /**
@@ -478,7 +419,6 @@ pub struct KeyValues {
     itr: *mut rocksdb_iterator_t
 }
 
-#[unsafe_destructor]
 impl Drop for KeyValues {
     fn drop(&mut self) {
         debug!("KeyValues::drop");

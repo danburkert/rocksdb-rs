@@ -1,6 +1,6 @@
 use super::*;
-use super::merge::ConcatMergeOperator;
-use std::io::{BufReader, MemWriter, TempDir};
+use super::merge::{AddMergeOperator, ConcatMergeOperator};
+use std::io::TempDir;
 
 #[test]
 fn test_create_database() {
@@ -183,35 +183,6 @@ fn test_set_merge_operator() {
     options.set_merge_operator("foo", box ConcatMergeOperator);
 }
 
-fn _read_u64(bytes: &[u8]) -> Option<u64> {
-    let mut reader = BufReader::new(bytes);
-    match reader.read_be_u64() {
-        Ok(val) => {
-            if reader.eof() {
-                Some(val)
-            } else {
-                error!("More than 8 bytes provided to `read_u64`: {}.", bytes);
-                None
-            }
-        },
-        Err(error) => {
-            error!("Encountered error {} when reading existing value {}.", error, bytes);
-            None
-        }
-    }
-}
-
-fn _write_u64(value: u64) -> Option<Vec<u8>> {
-    let mut writer = MemWriter::with_capacity(8);
-    match writer.write_be_u64(value) {
-        Ok(_) => Some(writer.unwrap()),
-        Err(error) => {
-            error!("Encountered error {} when writing value {}.", error, value);
-            None
-        }
-    }
-}
-
 #[test]
 fn test_merge() {
     let dir = TempDir::new("").unwrap();
@@ -230,5 +201,59 @@ fn test_merge() {
     default.merge(write_options, b"key", b"bar").unwrap();
     default.merge(write_options, b"key", b"-").unwrap();
     default.merge(write_options, b"key", b"baz").unwrap();
+    assert_eq!(b"foo-bar-baz", default.get(read_options, b"key").unwrap().unwrap().as_slice());
+}
+
+#[test]
+fn test_associative_merge() {
+    let dir = TempDir::new("").unwrap();
+    let mut options = ColumnFamilyOptions::new();
+    options.set_merge_operator("add", box AddMergeOperator);
+
+    let cfs = vec!(("default".to_string(), options)).into_iter().collect();
+    let read_options = &ReadOptions::new();
+    let write_options = &WriteOptions::new();
+
+    let db = Database::create(dir.path(), DatabaseOptions::new(), cfs).unwrap();
+    let default = db.get_column_family("default").unwrap();
+
+    default.put(write_options, b"key", AddMergeOperator::write_u64(1).unwrap().as_slice()).unwrap();
+    default.merge(write_options, b"key", AddMergeOperator::write_u64(1).unwrap().as_slice()).unwrap();
+    default.merge(write_options, b"key", AddMergeOperator::write_u64(2).unwrap().as_slice()).unwrap();
+    default.merge(write_options, b"key", AddMergeOperator::write_u64(3).unwrap().as_slice()).unwrap();
+    default.merge(write_options, b"key", AddMergeOperator::write_u64(5).unwrap().as_slice()).unwrap();
+    assert_eq!(AddMergeOperator::write_u64(12).unwrap().as_slice(),
+               default.get(read_options, b"key").unwrap().unwrap().as_slice());
+}
+
+//#[test]
+fn test_merge_fail() {
+
+    struct FailingMergeOperator;
+
+    impl AssociativeMergeOperator for FailingMergeOperator {
+        fn merge(&self,
+                 _key: &[u8],
+                 mut _existing_val: Vec<u8>,
+                 _operand: &[u8])
+                 -> Option<Vec<u8>> {
+            None
+        }
+    }
+
+    let dir = TempDir::new("").unwrap();
+    let mut options = ColumnFamilyOptions::new();
+    options.set_merge_operator("add", box FailingMergeOperator);
+
+    let cfs = vec!(("default".to_string(), options)).into_iter().collect();
+    let read_options = &ReadOptions::new();
+    let write_options = &WriteOptions::new();
+
+    let db = Database::create(dir.path(), DatabaseOptions::new(), cfs).unwrap();
+    let default = db.get_column_family("default").unwrap();
+
+    default.put(write_options, b"key", b"a").unwrap();
+    default.merge(write_options, b"key", b"b").unwrap();
+    default.merge(write_options, b"key", b"c").unwrap();
     assert_eq!(b"foo-bar-baz", default.get(read_options, b"key").unwrap().unwrap().as_slice());
 }
