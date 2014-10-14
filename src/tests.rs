@@ -1,4 +1,5 @@
 use super::*;
+use super::merge::ConcatMergeOperator;
 use std::io::{BufReader, MemWriter, TempDir};
 
 #[test]
@@ -179,10 +180,7 @@ fn test_comparator() {
 #[test]
 fn test_set_merge_operator() {
     let mut options = ColumnFamilyOptions::new();
-    options.set_merge_operator(
-        "foo",
-        |key, existing, operands| { None },
-        |key, operands| { None });
+    options.set_merge_operator("foo", box ConcatMergeOperator);
 }
 
 fn read_u64(bytes: &[u8]) -> Option<u64> {
@@ -218,26 +216,7 @@ fn write_u64(value: u64) -> Option<Vec<u8>> {
 fn test_merge() {
     let dir = TempDir::new("").unwrap();
     let mut options = ColumnFamilyOptions::new();
-    options.set_merge_operator(
-        "foo",
-        |_, existing, operands| {
-            let existing = existing.map(|bytes| read_u64(bytes)).unwrap_or(Some(0));
-
-            if let Some(existing_value) = existing {
-                let mut value = existing_value;
-                for &operand in operands.iter() {
-                    if let Some(next_value) = read_u64(operand) {
-                        value += next_value;
-                    } else {
-                        return None;
-                    }
-                }
-                write_u64(value)
-            } else {
-                None
-            }
-        },
-        |_, _| { None });
+    options.set_merge_operator("concat", box ConcatMergeOperator);
 
     let cfs = vec!(("default".to_string(), options)).into_iter().collect();
     let read_options = &ReadOptions::new();
@@ -246,8 +225,10 @@ fn test_merge() {
     let db = Database::create(dir.path(), DatabaseOptions::new(), cfs).unwrap();
     let default = db.get_column_family("default").unwrap();
 
-    //default.put(write_options, b"key", write_u64(12).unwrap().as_slice()).unwrap();
-    default.merge(write_options, b"key", write_u64(13).unwrap().as_slice()).unwrap();
-    let twenty_five = write_u64(13).unwrap();
-    assert_eq!(twenty_five.as_slice(), default.get(read_options, b"key").unwrap().unwrap().as_slice());
+    default.put(write_options, b"key", b"foo").unwrap();
+    default.merge(write_options, b"key", b"-").unwrap();
+    default.merge(write_options, b"key", b"bar").unwrap();
+    default.merge(write_options, b"key", b"-").unwrap();
+    default.merge(write_options, b"key", b"baz").unwrap();
+    assert_eq!(b"foo-bar-baz", default.get(read_options, b"key").unwrap().unwrap().as_slice());
 }

@@ -14,6 +14,7 @@ use ffi::*;
 #[cfg(test)]
 mod tests;
 mod ffi;
+mod merge;
 
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -288,46 +289,72 @@ extern "C" fn comparator_destructor_callback(state: *mut c_void) {
 //// Merge Operator
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
+/// The Merge Operator
+///
+/// Essentially, a MergeOperator specifies the semantics of a merge, which only client knows.
+/// It could be numeric addition, list append, string concatenation, edit data structure, ...,
+/// anything.  The library, on the other hand, is concerned with the exercise of this interface, at
+/// the right time (during get, iteration, compaction...).
+pub trait MergeOperator : Sync + Send {
+
+    /// Gives the client a way to express single-key read -> modify -> write semantics.
+    ///
+    /// * key: The key that's associated with this merge operation. Client could multiplex the merge
+    /// operator based on it if the key space is partitioned and different subspaces refer to
+    /// different types of data which have different merge operation semantics.
+    /// * existing_val: The value existing at the key prior to executing this merge.
+    /// * operands: The sequence of merge operations to apply, front first.
+    ///
+    /// All values passed in will be client-specific values. So if this method returns false, it is
+    /// because client specified bad data or there was internal corruption. This will be treated as
+    /// an error by the library.
+    fn full_merge(&self,
+                  key: &[u8],
+                  existing_val: Option<&[u8]>,
+                  operands: Vec<&[u8]>)
+                  -> Option<Vec<u8>>;
+
+    /// This function performs merge when all the operands are themselves merge operation types that
+    /// you would have passed to a ColumnFamily::merge call in the same order (front first).
+    /// (i.e. `ColumnFamily::merge(key, operands[0])`, followed by
+    /// `ColumnFamily::merge(key, operands[1])`, `...`)
+    ///
+    /// `partial_merge` should combine the operands into a single merge operation. The returned
+    /// operand should be constructed such that a call to `ColumnFamily::Merge(key, new_operand)`
+    /// would yield the same result as individual calls to `ColumnFamily::Merge(key, operand)` for
+    /// each operand in `operands` from front to back.
+    ///
+    /// `partial_merge` will be called only when the list of operands are long enough. The minimum
+    /// number of operands that will be passed to the function is specified by the
+    /// `ColumnFamilyOptions::min_partial_merge_operands` option.
+    fn partial_merge(&self,
+                     key: &[u8],
+                     operands: Vec<&[u8]>)
+                     -> Option<Vec<u8>>;
+}
+
 struct MergeOperatorState {
     name: CString,
-    full_merge: |&[u8], Option<&[u8]>, Vec<&[u8]>|: Sync + Send -> Option<Vec<u8>>,
-    partial_merge: |&[u8], Vec<&[u8]>|: Sync + Send -> Option<Vec<u8>>
+    merge_operator: Box<MergeOperator>
 }
 
-struct MergeOperator {
-    merge_operator: *mut rocksdb_mergeoperator_t
-}
-
-impl Drop for MergeOperator {
-    fn drop(&mut self) {
-        debug!("MergeOperator::drop");
-        // See https://github.com/facebook/rocksdb/issues/343
-        // unsafe { rocksdb_mergeoperator_destroy(self.merge_operator) }
-    }
-}
-
-impl MergeOperator {
-    fn new(name: &str,
-           full_merge: |&[u8], Option<&[u8]>, Vec<&[u8]>|: Sync + Send -> Option<Vec<u8>>,
-           partial_merge: |&[u8], Vec<&[u8]>|: Sync + Send -> Option<Vec<u8>>)
-           -> MergeOperator {
+impl MergeOperatorState {
+    fn new(name: &str, merge_operator: Box<MergeOperator>) -> *mut rocksdb_mergeoperator_t {
         let state = box MergeOperatorState { name: name.to_c_str(),
-                                             full_merge: full_merge,
-                                             partial_merge: partial_merge };
-        let merge_operator = unsafe {
+                                             merge_operator: merge_operator };
+        unsafe {
             rocksdb_mergeoperator_create(mem::transmute(state),
                                          merge_operator_destructor_callback,
                                          full_merge_callback,
                                          partial_merge_callback,
                                          merge_operator_delete_callback,
                                          merge_operator_name_callback)
-        };
-        MergeOperator { merge_operator: merge_operator }
+        }
     }
 }
 
 /// Callback that rocksdb will execute in order to get the name of the merge operator.
-extern "C" fn merge_operator_name_callback(state: *mut c_void) -> *const i8 {
+extern fn merge_operator_name_callback(state: *mut c_void) -> *const i8 {
      let x: &MergeOperatorState = unsafe { &*(state as *mut MergeOperatorState) };
      x.name.as_ptr()
 }
@@ -345,7 +372,7 @@ extern "C" fn full_merge_callback(state: *mut c_void,
             buf_as_optional_slice(existing_val as *const u8, existing_val_len as uint, |existing_val| {
                 bufs_as_slices(operands as *const *const u8, operand_lens, num_operands as uint, |operands| {
                     let state: &mut MergeOperatorState = &mut *(state as *mut MergeOperatorState);
-                    match (state.full_merge)(key, existing_val, operands) {
+                    match state.merge_operator.full_merge(key, existing_val, operands) {
                         Some(mut val) => {
                             let ptr = val.as_mut_ptr();
                             *len = val.len() as u64;
@@ -375,7 +402,7 @@ extern "C" fn partial_merge_callback(state: *mut c_void,
         slice::raw::buf_as_slice(key as *const u8, key_len as uint, |key| {
             bufs_as_slices(operands as *const *const u8, operand_lens, num_operands as uint, |operands| {
                 let state: &mut MergeOperatorState = &mut *(state as *mut MergeOperatorState);
-                match (state.partial_merge)(key, operands) {
+                match state.merge_operator.partial_merge(key, operands) {
                     Some(mut val) => {
                         val.shrink_to_fit();
                         let ptr = val.as_mut_ptr();
@@ -551,8 +578,7 @@ impl DatabaseOptions {
 /// Options for opening or creating a column family in a RocksDB database.
 pub struct ColumnFamilyOptions {
     options: *mut rocksdb_options_t,
-    comparator: Option<Comparator>,
-    merge_operator: Option<MergeOperator>
+    comparator: Option<Comparator>
 }
 
 impl Drop for ColumnFamilyOptions {
@@ -568,7 +594,7 @@ impl ColumnFamilyOptions {
     /// or creating a column family.
     pub fn new() -> ColumnFamilyOptions {
         let options = unsafe { rocksdb_options_create() };
-        ColumnFamilyOptions { options: options, comparator: None, merge_operator: None }
+        ColumnFamilyOptions { options: options, comparator: None }
     }
 
     /// Configure the column family to use level-style compaction with a memtable of size
@@ -617,12 +643,10 @@ impl ColumnFamilyOptions {
     /// Default: nullptr
     pub fn set_merge_operator(&mut self,
                               name: &str,
-                              full_merge: |&[u8], Option<&[u8]>, Vec<&[u8]>|: Sync + Send -> Option<Vec<u8>>,
-                              partial_merge: |&[u8], Vec<&[u8]>|: Sync + Send -> Option<Vec<u8>>)
+                              merge_operator: Box<MergeOperator>)
                               -> &mut ColumnFamilyOptions {
-        let merge_operator = MergeOperator::new(name, full_merge, partial_merge);
-        unsafe { rocksdb_options_set_merge_operator(self.options, merge_operator.merge_operator) };
-        self.merge_operator = Some(merge_operator);
+        let merge_operator = MergeOperatorState::new(name, merge_operator);
+        unsafe { rocksdb_options_set_merge_operator(self.options, merge_operator) };
         self
     }
 
