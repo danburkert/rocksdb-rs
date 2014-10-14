@@ -183,7 +183,7 @@ fn test_set_merge_operator() {
     options.set_merge_operator("foo", box ConcatMergeOperator);
 }
 
-fn read_u64(bytes: &[u8]) -> Option<u64> {
+fn _read_u64(bytes: &[u8]) -> Option<u64> {
     let mut reader = BufReader::new(bytes);
     match reader.read_be_u64() {
         Ok(val) => {
@@ -201,7 +201,7 @@ fn read_u64(bytes: &[u8]) -> Option<u64> {
     }
 }
 
-fn write_u64(value: u64) -> Option<Vec<u8>> {
+fn _write_u64(value: u64) -> Option<Vec<u8>> {
     let mut writer = MemWriter::with_capacity(8);
     match writer.write_be_u64(value) {
         Ok(_) => Some(writer.unwrap()),

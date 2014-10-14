@@ -1,13 +1,11 @@
-use libc::c_void;
-use std::{mem, ptr, raw, slice, vec};
-
 use super::MergeOperator;
 
 /// The simpler, associative merge operator.
-pub trait AssociativeMergeOperator : MergeOperator{
-
+pub trait AssociativeMergeOperator: Sync + Send {
     fn merge(&self, key: &[u8], existing_val: Vec<u8>, operand: &[u8]) -> Option<Vec<u8>>;
+}
 
+impl<T: AssociativeMergeOperator> MergeOperator for T {
     fn full_merge(&self,
                   key: &[u8],
                   existing_val: Option<&[u8]>,
@@ -45,12 +43,13 @@ pub struct ConcatMergeOperator;
 
 impl MergeOperator for ConcatMergeOperator {
 
-    fn full_merge(&self, key: &[u8],
+    fn full_merge(&self,
+                  _key: &[u8],
                   existing_val: Option<&[u8]>,
                   operands: Vec<&[u8]>)
                   -> Option<Vec<u8>> {
         let cap = existing_val.map(|val| val.len()).unwrap_or(0)
-            + operands.iter().fold(0, |acc, elem| acc + elem.len());
+                + operands.iter().fold(0, |acc, elem| acc + elem.len());
 
         let mut vec = Vec::with_capacity(cap);
 
@@ -66,7 +65,7 @@ impl MergeOperator for ConcatMergeOperator {
     }
 
     fn partial_merge(&self,
-                     key: &[u8],
+                     _key: &[u8],
                      operands: Vec<&[u8]>)
                      -> Option<Vec<u8>> {
         let cap = operands.iter().fold(0, |acc, elem| acc + elem.len());
@@ -75,5 +74,15 @@ impl MergeOperator for ConcatMergeOperator {
             vec.push_all(operand);
         }
         Some(vec)
+    }
+}
+
+pub struct AssociativeConcat;
+
+impl AssociativeMergeOperator for AssociativeConcat {
+
+    fn merge(&self, key: &[u8], mut existing_val: Vec<u8>, operand: &[u8]) -> Option<Vec<u8>> {
+        existing_val.push_all(operand);
+        Some(existing_val)
     }
 }

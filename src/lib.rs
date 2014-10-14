@@ -360,19 +360,19 @@ extern fn merge_operator_name_callback(state: *mut c_void) -> *const i8 {
 }
 
 /// Callback that rocksdb will execute to perform a full merge.
-extern "C" fn full_merge_callback(state: *mut c_void,
-                                  key: *const i8, key_len: u64,
-                                  existing_val: *const i8, existing_val_len: u64,
-                                  operands: *const *const i8, operand_lens: *const u64,
-                                  num_operands: i32,
-                                  success: *mut u8, len: *mut u64)
-                                  -> *mut i8 {
+extern fn full_merge_callback(state: *mut c_void,
+                              key: *const i8, key_len: u64,
+                              existing_val: *const i8, existing_val_len: u64,
+                              operands: *const *const i8, operand_lens: *const u64,
+                              num_operands: i32,
+                              success: *mut u8, len: *mut u64)
+                              -> *mut i8 {
     unsafe {
         slice::raw::buf_as_slice(key as *const u8, key_len as uint, |key| {
             buf_as_optional_slice(existing_val as *const u8, existing_val_len as uint, |existing_val| {
                 bufs_as_slices(operands as *const *const u8, operand_lens, num_operands as uint, |operands| {
                     let state: &mut MergeOperatorState = &mut *(state as *mut MergeOperatorState);
-                    match state.merge_operator.full_merge(key, existing_val, operands) {
+                    match (*state.merge_operator).full_merge(key, existing_val, operands) {
                         Some(mut val) => {
                             let ptr = val.as_mut_ptr();
                             *len = val.len() as u64;
@@ -392,17 +392,17 @@ extern "C" fn full_merge_callback(state: *mut c_void,
 }
 
 /// Callback that rocksdb will execute to perform a partial merge.
-extern "C" fn partial_merge_callback(state: *mut c_void,
-                                     key: *const i8, key_len: u64,
-                                     operands: *const *const i8, operand_lens: *const u64,
-                                     num_operands: i32,
-                                     success: *mut u8, len: *mut u64)
-                                     -> *mut i8 {
+extern fn partial_merge_callback(state: *mut c_void,
+                                 key: *const i8, key_len: u64,
+                                 operands: *const *const i8, operand_lens: *const u64,
+                                 num_operands: i32,
+                                 success: *mut u8, len: *mut u64)
+                                 -> *mut i8 {
     unsafe {
         slice::raw::buf_as_slice(key as *const u8, key_len as uint, |key| {
             bufs_as_slices(operands as *const *const u8, operand_lens, num_operands as uint, |operands| {
                 let state: &mut MergeOperatorState = &mut *(state as *mut MergeOperatorState);
-                match state.merge_operator.partial_merge(key, operands) {
+                match (*state.merge_operator).partial_merge(key, operands) {
                     Some(mut val) => {
                         val.shrink_to_fit();
                         let ptr = val.as_mut_ptr();
