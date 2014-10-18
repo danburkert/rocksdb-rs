@@ -257,3 +257,32 @@ fn test_merge_fail() {
     default.merge(write_options, b"key", b"c").unwrap();
     assert_eq!(b"foo-bar-baz", default.get(read_options, b"key").unwrap().unwrap().as_slice());
 }
+
+#[test]
+fn test_write_batch() {
+    let dir = TempDir::new("").unwrap();
+    let db_options = DatabaseOptions::new();
+    let cfs = vec!(("default".to_string(), ColumnFamilyOptions::new()),
+                   ("other".to_string(), ColumnFamilyOptions::new())).into_iter().collect();
+    let read_options = ReadOptions::new();
+    let write_options = WriteOptions::new();
+
+    let db = Database::create(dir.path(), db_options, cfs).unwrap();
+    let default = db.get_column_family("default").unwrap();
+    let other = db.get_column_family("other").unwrap();
+
+    default.put(&write_options, b"key", b"val1").unwrap();
+    other.put(&write_options, b"key", b"val1").unwrap();
+
+    let mut batch = WriteBatch::new();
+    batch.put(default, b"key", b"to-be-cleared");
+    batch.put(other, b"key", b"to-be-cleared");
+    batch.clear();
+    batch.put(default, b"key", b"val2");
+    batch.delete(other, b"key");
+
+    db.write(&write_options, batch);
+
+    assert_eq!(default.get(&read_options, b"key").unwrap().unwrap().as_slice(), b"val2");
+    assert!(other.get(&read_options, b"key").unwrap().is_none());
+}

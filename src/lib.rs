@@ -118,6 +118,22 @@ impl Database {
     pub fn get_column_families(&self) -> &HashMap<String, ColumnFamily> {
         &self.column_families
     }
+
+    pub fn write(&self, options: &WriteOptions, write_batch: WriteBatch) -> Result<(), String> {
+        let mut error: *mut i8 = ptr::null_mut();
+        unsafe {
+            rocksdb_write(self.database,
+                          options.options(),
+                          write_batch.write_batch,
+                          (&mut error) as *mut *mut i8);
+            if error == ptr::null_mut() {
+                Ok(())
+            } else {
+                Err(CString::new(error as *const i8, true).to_string())
+            }
+        }
+
+    }
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -463,6 +479,62 @@ impl Iterator<KeyValue> for KeyValues {
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
+////// Write Batch
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+pub struct WriteBatch {
+    write_batch: *mut rocksdb_writebatch_t
+}
+
+impl Drop for WriteBatch {
+    fn drop(&mut self) {
+        debug!("WriteBatch::drop");
+        unsafe { rocksdb_writebatch_destroy(self.write_batch) }
+    }
+}
+
+impl WriteBatch {
+
+    pub fn new() -> WriteBatch {
+        WriteBatch { write_batch: unsafe { rocksdb_writebatch_create() } }
+    }
+
+    pub fn put(&mut self, column_family: &ColumnFamily, key: &[u8], val: &[u8]) {
+        unsafe {
+            rocksdb_writebatch_put_cf(self.write_batch,
+                                      column_family.column_family,
+                                      key.as_ptr() as *const i8, key.len() as u64,
+                                      val.as_ptr() as *const i8, val.len() as u64)
+        }
+    }
+
+    pub fn delete(&mut self, column_family: &ColumnFamily, key: &[u8]) {
+        unsafe {
+            rocksdb_writebatch_delete_cf(self.write_batch,
+                                         column_family.column_family,
+                                         key.as_ptr() as *const i8, key.len() as u64)
+        }
+    }
+
+    pub fn merge(&mut self, column_family: &ColumnFamily, key: &[u8], val: &[u8]) {
+        unsafe {
+            rocksdb_writebatch_merge_cf(self.write_batch,
+                                        column_family.column_family,
+                                        key.as_ptr() as *const i8, key.len() as u64,
+                                        val.as_ptr() as *const i8, val.len() as u64)
+        }
+    }
+
+    pub fn count(&self) -> i32 {
+        unsafe { rocksdb_writebatch_count(self.write_batch) }
+    }
+
+    pub fn clear(&mut self) {
+        unsafe { rocksdb_writebatch_clear(self.write_batch) }
+    }
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
 ////// Options
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -594,11 +666,6 @@ impl ColumnFamilyOptions {
     fn options(&self) -> *const rocksdb_options_t {
         self.options as *const rocksdb_options_t
     }
-
-    /// Mutably get the raw `rocksdb_options_t` struct.
-    fn options_mut(&self) -> *mut rocksdb_options_t {
-        self.options
-    }
 }
 
 /// Options for writing to a RocksDB database.
@@ -656,11 +723,6 @@ impl WriteOptions {
     fn options(&self) -> *const rocksdb_writeoptions_t {
         self.options as *const rocksdb_writeoptions_t
     }
-
-    /// Mutably get the raw `rocksdb_writeoptions_t` struct.
-    fn options_mut(&self) -> *mut rocksdb_writeoptions_t {
-        self.options
-    }
 }
 
 /// Options for reading from a RocksDB database.
@@ -709,10 +771,5 @@ impl ReadOptions {
     /// Get the raw `rocksdb_readoptions_t` struct.
     fn options(&self) -> *const rocksdb_readoptions_t {
         self.options as *const rocksdb_readoptions_t
-    }
-
-    /// Mutably get the raw `rocksdb_readoptions_t` struct.
-    fn options_mut(&self) -> *mut rocksdb_readoptions_t {
-        self.options
     }
 }

@@ -248,15 +248,15 @@ extern {
                                   val: *const c_char, val_len: size_t);
     pub fn rocksdb_writebatch_put_cf(batch: *mut rocksdb_writebatch_t,
                                      column_family: *mut rocksdb_column_family_handle_t,
-                                     key: *const c_char, key_len: *const c_uchar,
+                                     key: *const c_char, key_len: size_t,
                                      val: *const c_char, val_len: size_t);
     pub fn rocksdb_writebatch_merge(batch: *mut rocksdb_writebatch_t,
                                     key: *const c_char, key_len: size_t,
                                     val: *const c_char, val_len: size_t);
     pub fn rocksdb_writebatch_merge_cf(batch: *mut rocksdb_writebatch_t,
                                        column_family: *mut rocksdb_column_family_handle_t,
-                                       key: *const char, key_len: size_t,
-                                       val: *const char, val_len: size_t);
+                                       key: *const c_char, key_len: size_t,
+                                       val: *const c_char, val_len: size_t);
     pub fn rocksdb_writebatch_delete(batch: *mut rocksdb_writebatch_t,
                                      key: *const char, key_len: size_t);
     pub fn rocksdb_writebatch_delete_cf(batch: *mut rocksdb_writebatch_t,
