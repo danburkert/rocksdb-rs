@@ -1,17 +1,17 @@
 use super::*;
 use super::merge::{AddMergeOperator, ConcatMergeOperator};
-use std::io::TempDir;
+use std::io;
 
 #[test]
 fn test_create_database() {
-    let dir = TempDir::new("foo").unwrap();
+    let dir = io::TempDir::new("foo").unwrap();
     let cfs = vec!(("default".to_string(), ColumnFamilyOptions::new())).into_iter().collect();
     Database::create(dir.path(), DatabaseOptions::new(), cfs).unwrap();
 }
 
 #[test]
 fn test_create_database_multiple_cfs() {
-    let dir = TempDir::new("foo").unwrap();
+    let dir = io::TempDir::new("foo").unwrap();
     let cfs = vec!(("default".to_string(), ColumnFamilyOptions::new()),
                    ("other".to_string(), ColumnFamilyOptions::new())).into_iter().collect();
     Database::create(dir.path(), DatabaseOptions::new(), cfs).unwrap();
@@ -19,7 +19,7 @@ fn test_create_database_multiple_cfs() {
 
 #[test]
 fn test_create_while_open_fails() {
-    let dir = TempDir::new("").unwrap();
+    let dir = io::TempDir::new("").unwrap();
     let cfs1 = vec!(("default".to_string(), ColumnFamilyOptions::new())).into_iter().collect();
     let cfs2 = vec!(("default".to_string(), ColumnFamilyOptions::new())).into_iter().collect();
     assert!(Database::create(dir.path(), DatabaseOptions::new(), cfs1).is_ok());
@@ -28,7 +28,7 @@ fn test_create_while_open_fails() {
 
 #[test]
 fn test_create_duplicate_fails() {
-    let dir = TempDir::new("").unwrap();
+    let dir = io::TempDir::new("").unwrap();
 
     {
         let cfs = vec!(("default".to_string(), ColumnFamilyOptions::new())).into_iter().collect();
@@ -42,7 +42,7 @@ fn test_create_duplicate_fails() {
 
 #[test]
 fn test_put_get() {
-    let dir = TempDir::new("").unwrap();
+    let dir = io::TempDir::new("").unwrap();
     let db_options = DatabaseOptions::new();
     let cfs = vec!(("default".to_string(), ColumnFamilyOptions::new()),
                    ("other".to_string(), ColumnFamilyOptions::new())).into_iter().collect();
@@ -63,7 +63,7 @@ fn test_put_get() {
 
 #[test]
 fn test_iterator() {
-    let dir = TempDir::new("").unwrap();
+    let dir = io::TempDir::new("").unwrap();
     let mut reversed_cf_options = ColumnFamilyOptions::new();
 
     reversed_cf_options.set_comparator("foo", |x, y| {
@@ -139,7 +139,7 @@ fn test_set_comparator() {
 
 #[test]
 fn test_comparator() {
-    let dir = TempDir::new("").unwrap();
+    let dir = io::TempDir::new("").unwrap();
     let mut reversed_cf_options = ColumnFamilyOptions::new();
 
     reversed_cf_options.set_comparator("foo", |x, y| {
@@ -185,7 +185,7 @@ fn test_set_merge_operator() {
 
 #[test]
 fn test_merge() {
-    let dir = TempDir::new("").unwrap();
+    let dir = io::TempDir::new("").unwrap();
     let mut options = ColumnFamilyOptions::new();
     options.set_merge_operator("concat", box ConcatMergeOperator);
 
@@ -206,7 +206,7 @@ fn test_merge() {
 
 #[test]
 fn test_associative_merge() {
-    let dir = TempDir::new("").unwrap();
+    let dir = io::TempDir::new("").unwrap();
     let mut options = ColumnFamilyOptions::new();
     options.set_merge_operator("add", box AddMergeOperator);
 
@@ -226,7 +226,8 @@ fn test_associative_merge() {
                default.get(read_options, b"key").unwrap().unwrap().as_slice());
 }
 
-//#[test]
+#[test]
+#[should_fail]
 fn test_merge_fail() {
 
     struct FailingMergeOperator;
@@ -234,14 +235,14 @@ fn test_merge_fail() {
     impl AssociativeMergeOperator for FailingMergeOperator {
         fn merge(&self,
                  _key: &[u8],
-                 mut _existing_val: Vec<u8>,
+                 _existing_val: Vec<u8>,
                  _operand: &[u8])
-                 -> Option<Vec<u8>> {
-            None
+                 -> io::IoResult<Vec<u8>> {
+            Err(io::standard_error(io::OtherIoError))
         }
     }
 
-    let dir = TempDir::new("").unwrap();
+    let dir = io::TempDir::new("").unwrap();
     let mut options = ColumnFamilyOptions::new();
     options.set_merge_operator("add", box FailingMergeOperator);
 
@@ -260,7 +261,7 @@ fn test_merge_fail() {
 
 #[test]
 fn test_write_batch() {
-    let dir = TempDir::new("").unwrap();
+    let dir = io::TempDir::new("").unwrap();
     let db_options = DatabaseOptions::new();
     let cfs = vec!(("default".to_string(), ColumnFamilyOptions::new()),
                    ("other".to_string(), ColumnFamilyOptions::new())).into_iter().collect();
@@ -281,7 +282,7 @@ fn test_write_batch() {
     batch.put(default, b"key", b"val2");
     batch.delete(other, b"key");
 
-    db.write(&write_options, batch);
+    let _ = db.write(&write_options, batch);
 
     assert_eq!(default.get(&read_options, b"key").unwrap().unwrap().as_slice(), b"val2");
     assert!(other.get(&read_options, b"key").unwrap().is_none());

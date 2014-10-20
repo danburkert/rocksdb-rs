@@ -1,5 +1,4 @@
-use std::{mem, raw, slice};
-use std::io::{BufReader, MemWriter};
+use std::{io, mem, raw, slice};
 use std::kinds::marker;
 
 /// The Merge Operator
@@ -25,7 +24,7 @@ pub trait MergeOperator : Sync + Send {
                   key: &[u8],
                   existing_val: Option<&[u8]>,
                   operands: Operands)
-                  -> Option<Vec<u8>>;
+                  -> io::IoResult<Vec<u8>>;
 
     /// This function performs merge when all the operands are themselves merge operation types that
     /// you would have passed to a ColumnFamily::merge call in the same order (front first).
@@ -43,13 +42,12 @@ pub trait MergeOperator : Sync + Send {
     fn partial_merge(&self,
                      key: &[u8],
                      operands: Operands)
-                     -> Option<Vec<u8>>;
+                     -> io::IoResult<Vec<u8>>;
 }
-
 
 /// The simpler, associative merge operator.
 pub trait AssociativeMergeOperator: Sync + Send {
-    fn merge(&self, key: &[u8], existing_val: Vec<u8>, operand: &[u8]) -> Option<Vec<u8>>;
+    fn merge(&self, key: &[u8], existing_val: Vec<u8>, operand: &[u8]) -> io::IoResult<Vec<u8>>;
 }
 
 impl<T: AssociativeMergeOperator> MergeOperator for T {
@@ -57,9 +55,13 @@ impl<T: AssociativeMergeOperator> MergeOperator for T {
                   key: &[u8],
                   existing_val: Option<&[u8]>,
                   mut operands: Operands)
-                  -> Option<Vec<u8>> {
-        let base: Option<Vec<u8>> = existing_val.map(|val| val.to_vec())
-                                                .or_else(|| operands.next().map(|val| val.to_vec()));
+                  -> io::IoResult<Vec<u8>> {
+        // base should never be Err, since operands always contains at least 1 element
+        let base: io::IoResult<Vec<u8>> =
+            existing_val.map(|val| val.to_vec())
+                        .or_else(|| operands.next().map(|val| val.to_vec()))
+                        .ok_or(io::standard_error(io::OtherIoError));
+
         operands.fold(base, |existing, operand| {
             existing.and_then(|existing| {
                 self.merge(key, existing, operand)
@@ -70,8 +72,11 @@ impl<T: AssociativeMergeOperator> MergeOperator for T {
     fn partial_merge(&self,
                      key: &[u8],
                      mut operands: Operands)
-                     -> Option<Vec<u8>> {
-        let base: Option<Vec<u8>> = operands.next().map(|val| val.to_vec());
+                     -> io::IoResult<Vec<u8>> {
+        // base should never be Err, since operands always contains at least 1 element
+        let base: io::IoResult<Vec<u8>> = operands.next()
+                                                  .map(|val| val.to_vec())
+                                                  .ok_or(io::standard_error(io::OtherIoError));
         operands.fold(base, |existing, operand| {
             existing.and_then(|existing| {
                 self.merge(key, existing, operand)
@@ -160,7 +165,7 @@ impl MergeOperator for ConcatMergeOperator {
                   _key: &[u8],
                   existing_val: Option<&[u8]>,
                   mut operands: Operands)
-                  -> Option<Vec<u8>> {
+                  -> io::IoResult<Vec<u8>> {
         let cap = existing_val.map(|val| val.len()).unwrap_or(0)
                 + operands.clone().fold(0, |acc, elem| acc + elem.len());
 
@@ -174,19 +179,19 @@ impl MergeOperator for ConcatMergeOperator {
             vec.push_all(operand);
         }
 
-        Some(vec)
+        Ok(vec)
     }
 
     fn partial_merge(&self,
                      _key: &[u8],
                      mut operands: Operands)
-                     -> Option<Vec<u8>> {
+                     -> io::IoResult<Vec<u8>> {
         let cap = operands.clone().fold(0, |acc, elem| acc + elem.len());
         let mut vec = Vec::with_capacity(cap);
         for operand in operands {
             vec.push_all(operand);
         }
-        Some(vec)
+        Ok(vec)
     }
 }
 
@@ -194,33 +199,14 @@ pub struct AddMergeOperator;
 
 impl AddMergeOperator {
 
-    pub fn read_u64(bytes: &[u8]) -> Option<u64> {
-        let mut reader = BufReader::new(bytes);
-        match reader.read_be_u64() {
-            Ok(val) => {
-                if reader.eof() {
-                    Some(val)
-                } else {
-                    error!("More than 8 bytes provided to `read_u64`: {}.", bytes);
-                    None
-                }
-            },
-            Err(error) => {
-                error!("Encountered error {} when reading existing value {}.", error, bytes);
-                None
-            }
-        }
+    pub fn read_u64(bytes: &[u8]) -> io::IoResult<u64> {
+        io::BufReader::new(bytes).read_be_u64()
     }
 
-    pub fn write_u64(value: u64) -> Option<Vec<u8>> {
-        let mut writer = MemWriter::with_capacity(8);
-        match writer.write_be_u64(value) {
-            Ok(_) => Some(writer.unwrap()),
-            Err(error) => {
-                error!("Encountered error {} when writing value {}.", error, value);
-                None
-            }
-        }
+    pub fn write_u64(value: u64) -> io::IoResult<Vec<u8>> {
+        let mut writer = io::MemWriter::with_capacity(8);
+        try!(writer.write_be_u64(value));
+        Ok(writer.unwrap())
     }
 }
 
@@ -229,11 +215,9 @@ impl AssociativeMergeOperator for AddMergeOperator {
              _key: &[u8],
              existing_val: Vec<u8>,
              operand: &[u8])
-             -> Option<Vec<u8>> {
-        match (AddMergeOperator::read_u64(existing_val.as_slice()),
-               AddMergeOperator::read_u64(operand)) {
-            (Some(existing), Some(operand)) => AddMergeOperator::write_u64(existing + operand),
-            _ => None
-        }
+             -> io::IoResult<Vec<u8>> {
+        let existing = try!(AddMergeOperator::read_u64(existing_val.as_slice()));
+        let operand = try!(AddMergeOperator::read_u64(operand));
+        AddMergeOperator::write_u64(existing + operand)
     }
 }

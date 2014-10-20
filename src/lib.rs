@@ -344,20 +344,17 @@ extern fn full_merge_callback(state: *mut c_void,
             buf_as_optional_slice(existing_val as *const u8, existing_val_len as uint, |existing_val| {
                 let operands = Operands::new(operands as *const *const u8, operand_lens, num_operands as uint);
                 let state: &mut MergeOperatorState = &mut *(state as *mut MergeOperatorState);
-                match (*state.merge_operator).full_merge(key, existing_val, operands) {
-                    Some(mut val) => {
-                        val.shrink_to_fit();
-                        let ptr = val.as_mut_ptr();
-                        *len = val.len() as u64;
-                        *success = 1;
-                        mem::forget(val);
-                        ptr as *mut i8
-                    }
-                    None => {
-                        *success = 0;
-                        ptr::null_mut()
-                    }
-                }
+
+                // The RocksDB C API does not correctly handle merge operator failures, so it is better
+                // to catch them here and explicitly unwind the stack. If the failure is propogated
+                // through the C API, a segfault occurs.
+                let mut val = (*state.merge_operator).full_merge(key, existing_val, operands).unwrap();
+                val.shrink_to_fit();
+                let ptr = val.as_mut_ptr();
+                *len = val.len() as u64;
+                *success = 1;
+                mem::forget(val);
+                ptr as *mut i8
             })
         })
     }
@@ -374,28 +371,24 @@ extern fn partial_merge_callback(state: *mut c_void,
         slice::raw::buf_as_slice(key as *const u8, key_len as uint, |key| {
             let operands = Operands::new(operands as *const *const u8, operand_lens, num_operands as uint);
             let state: &mut MergeOperatorState = &mut *(state as *mut MergeOperatorState);
-            match (*state.merge_operator).partial_merge(key, operands) {
-                Some(mut val) => {
-                    val.shrink_to_fit();
-                    let ptr = val.as_mut_ptr();
-                    *len = val.len() as u64;
-                    *success = 1;
-                    mem::forget(val);
-                    ptr as *mut i8
-                }
-                None => {
-                    *len = 0;
-                    *success = 0;
-                    ptr::null_mut()
-                }
-            }
+
+            // The RocksDB C API does not correctly handle merge operator failures, so it is better
+            // to catch them here and explicitly unwind the stack. If the failure is propogated
+            // through the C API, a segfault occurs.
+            let mut val = (*state.merge_operator).partial_merge(key, operands).unwrap();
+            val.shrink_to_fit();
+            let ptr = val.as_mut_ptr();
+            *len = val.len() as u64;
+            *success = 1;
+            mem::forget(val);
+            ptr as *mut i8
         })
     }
 }
 
 /// Callback that rocksdb will execute to  the result of a merge.
 extern fn merge_operator_delete_callback(_state: *mut c_void,
-                                             val: *const i8, val_len: u64) {
+                                         val: *const i8, val_len: u64) {
     let _ = unsafe { Vec::from_raw_parts(val_len as uint, val_len as uint, val as *mut u8) };
 }
 
