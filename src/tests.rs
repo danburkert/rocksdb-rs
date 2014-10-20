@@ -1,5 +1,5 @@
 use super::*;
-use super::merge::{AddMergeOperator, ConcatMergeOperator};
+use super::merge_operators::{AddMergeOperator, ConcatMergeOperator};
 use std::io;
 
 #[test]
@@ -67,7 +67,7 @@ fn test_iterator() {
     let mut reversed_cf_options = ColumnFamilyOptions::new();
 
     reversed_cf_options.set_comparator("foo", |x, y| {
-        y.cmp(&x)
+        y.cmp(x)
     });
 
     let cfs = vec!(("default".to_string(), ColumnFamilyOptions::new()),
@@ -133,7 +133,7 @@ fn test_create_read_options() {
 fn test_set_comparator() {
     let mut options = ColumnFamilyOptions::new();
     options.set_comparator("foo", |x, y| {
-        y.cmp(&x)
+        y.cmp(x)
     });
 }
 
@@ -143,7 +143,7 @@ fn test_comparator() {
     let mut reversed_cf_options = ColumnFamilyOptions::new();
 
     reversed_cf_options.set_comparator("foo", |x, y| {
-        y.cmp(&x)
+        y.cmp(x)
     });
 
     let cfs = vec!(("default".to_string(), ColumnFamilyOptions::new()),

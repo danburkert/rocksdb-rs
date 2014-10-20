@@ -544,4 +544,21 @@ extern {
     /* Cache */
     pub fn rocksdb_cache_create_lru(capacity: size_t) -> *mut rocksdb_cache_t;
     pub fn rocksdb_cache_destroy(cache: *mut rocksdb_cache_t);
+
+    /* SliceTransform */
+
+    pub fn rocksdb_slicetranform_create(state: *mut c_void,
+                                        destructor: extern fn(*mut c_void),
+                                        transform: extern fn(*mut c_void,           // state
+                                                             *const c_char, size_t, // key
+                                                             *mut size_t)           // prefix length
+                                                             -> *mut c_char,        // result
+                                        in_domain: extern fn(*mut c_void,           // state
+                                                             *const c_char, size_t) // key
+                                                             -> c_uchar,           // result
+                                        in_range: extern fn(*mut c_void,           // state
+                                                            *const c_char, size_t) // key
+                                                            -> c_uchar,            // result
+                                        name: extern fn(*mut c_void) -> *const c_char)
+                                        -> *mut rocksdb_slicetransform_t;
 }

@@ -1,4 +1,4 @@
-#![feature(phase, globs, unsafe_destructor, if_let)]
+#![feature(phase, globs, unsafe_destructor)]
 #[phase(plugin, link)] extern crate log;
 extern crate libc;
 
@@ -6,16 +6,16 @@ use libc::c_void;
 use std::c_str::CString;
 use std::c_vec::CVec;
 use std::collections::HashMap;
+use std::kinds::marker;
 use std::path::posix::Path;
-use std::{mem, ptr, raw, slice, vec};
+use std::{io, mem, ptr, raw, slice, vec};
 
 use ffi::*;
-pub use merge::{AssociativeMergeOperator, MergeOperator, Operands};
 
 #[cfg(test)]
 mod tests;
 mod ffi;
-mod merge;
+pub mod merge_operators;
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 //// Database
@@ -70,7 +70,6 @@ impl Database {
                       column_family_options: HashMap<String, ColumnFamilyOptions>)
                       -> Result<Database, String> {
         let num_cfs = column_family_options.len();
-        debug!("num of column families: {}", num_cfs);
         let (cf_names, cf_options) = vec::unzip(column_family_options.into_iter());
 
         // Translate the column family names to a vec of c string pointers.
@@ -112,7 +111,7 @@ impl Database {
     }
 
     pub fn get_column_family<'a>(&'a self, column_family: &str) -> Option<&'a ColumnFamily> {
-        self.column_families.find_equiv(&column_family)
+        self.column_families.find_equiv(column_family)
     }
 
     pub fn get_column_families(&self) -> &HashMap<String, ColumnFamily> {
@@ -305,6 +304,159 @@ extern fn comparator_destructor_callback(state: *mut c_void) {
 //// Merge Operator
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
+/// The Merge Operator
+///
+/// Essentially, a MergeOperator specifies the semantics of a merge, which only client knows.
+/// It could be numeric addition, list append, string concatenation, edit data structure, ...,
+/// anything.  The library, on the other hand, is concerned with the exercise of this interface, at
+/// the right time (during get, iteration, compaction...).
+pub trait MergeOperator : Sync + Send {
+
+    /// Gives the client a way to express single-key read -> modify -> write semantics.
+    ///
+    /// * key: The key that's associated with this merge operation. Client could multiplex the merge
+    /// operator based on it if the key space is partitioned and different subspaces refer to
+    /// different types of data which have different merge operation semantics.
+    /// * existing_val: The value existing at the key prior to executing this merge.
+    /// * operands: The sequence of merge operations to apply, front first.
+    ///
+    /// All values passed in will be client-specific values. So if this method returns false, it is
+    /// because client specified bad data or there was internal corruption. This will be treated as
+    /// an error by the library.
+    fn full_merge(&self,
+                  key: &[u8],
+                  existing_val: Option<&[u8]>,
+                  operands: Operands)
+                  -> io::IoResult<Vec<u8>>;
+
+    /// This function performs merge when all the operands are themselves merge operation types that
+    /// you would have passed to a ColumnFamily::merge call in the same order (front first).
+    /// (i.e. `ColumnFamily::merge(key, operands[0])`, followed by
+    /// `ColumnFamily::merge(key, operands[1])`, `...`)
+    ///
+    /// `partial_merge` should combine the operands into a single merge operation. The returned
+    /// operand should be constructed such that a call to `ColumnFamily::Merge(key, new_operand)`
+    /// would yield the same result as individual calls to `ColumnFamily::Merge(key, operand)` for
+    /// each operand in `operands` from front to back.
+    ///
+    /// `partial_merge` will be called only when the list of operands are long enough. The minimum
+    /// number of operands that will be passed to the function is specified by the
+    /// `ColumnFamilyOptions::min_partial_merge_operands` option.
+    fn partial_merge(&self,
+                     key: &[u8],
+                     operands: Operands)
+                     -> io::IoResult<Vec<u8>>;
+}
+
+/// The simpler, associative merge operator.
+pub trait AssociativeMergeOperator: Sync + Send {
+    fn merge(&self, key: &[u8], existing_val: Vec<u8>, operand: &[u8]) -> io::IoResult<Vec<u8>>;
+}
+
+impl<T: AssociativeMergeOperator> MergeOperator for T {
+    fn full_merge(&self,
+                  key: &[u8],
+                  existing_val: Option<&[u8]>,
+                  mut operands: Operands)
+                  -> io::IoResult<Vec<u8>> {
+        // base should never be Err, since operands always contains at least 1 element
+        let base: io::IoResult<Vec<u8>> =
+            existing_val.map(|val| val.to_vec())
+                        .or_else(|| operands.next().map(|val| val.to_vec()))
+                        .ok_or(io::standard_error(io::OtherIoError));
+
+        operands.fold(base, |existing, operand| {
+            existing.and_then(|existing| {
+                self.merge(key, existing, operand)
+            })
+        })
+    }
+
+    fn partial_merge(&self,
+                     key: &[u8],
+                     mut operands: Operands)
+                     -> io::IoResult<Vec<u8>> {
+        // base should never be Err, since operands always contains at least 1 element
+        let base: io::IoResult<Vec<u8>> = operands.next()
+                                                  .map(|val| val.to_vec())
+                                                  .ok_or(io::standard_error(io::OtherIoError));
+        operands.fold(base, |existing, operand| {
+            existing.and_then(|existing| {
+                self.merge(key, existing, operand)
+            })
+        })
+    }
+}
+
+pub struct Operands<'a> {
+    operands: slice::Items<'a, *const u8>,
+    lens: slice::Items<'a, u64>,
+    marker: marker::ContravariantLifetime<'a>
+}
+
+impl<'a> Operands<'a> {
+
+    fn new(operands: *const *const u8,
+               operand_lens: *const u64,
+               num_operands: uint)
+               -> Operands<'a> {
+        unsafe {
+            slice::raw::buf_as_slice(operands, num_operands, |operands| {
+                slice::raw::buf_as_slice(operand_lens, num_operands, |operand_lens| {
+                    // Transumutes are necessary for lifetime params
+                    Operands { operands: mem::transmute(operands.iter()),
+                               lens: mem::transmute(operand_lens.iter()),
+                               marker: marker::ContravariantLifetime::<'a> }
+                })
+            })
+        }
+    }
+}
+
+impl<'a> Iterator<&'a [u8]> for Operands<'a> {
+
+    fn next(&mut self) -> Option<&'a [u8]> {
+        match (self.operands.next(), self.lens.next()) {
+            (Some(operand), Some(len)) =>
+                unsafe { Some(mem::transmute(raw::Slice { data: *operand, len: *len as uint })) },
+            _ => None
+        }
+    }
+
+    fn size_hint(&self) -> (uint, Option<uint>) {
+        self.operands.size_hint()
+    }
+}
+
+impl<'a> DoubleEndedIterator<&'a [u8]> for Operands<'a> {
+    #[inline]
+    fn next_back(&mut self) -> Option<&'a [u8]> {
+        match (self.operands.next(), self.lens.next()) {
+            (Some(operand), Some(len)) =>
+                unsafe { Some(mem::transmute(raw::Slice { data: *operand, len: *len as uint })) },
+            _ => None
+        }
+    }
+}
+
+impl<'a> Clone for Operands<'a> {
+    fn clone(&self) -> Operands<'a> { *self }
+}
+
+impl<'a> RandomAccessIterator<&'a [u8]> for Operands<'a> {
+    fn indexable(&self) -> uint {
+        self.operands.indexable()
+    }
+
+    fn idx(&mut self, index: uint) -> Option<&'a [u8]> {
+        match (self.operands.idx(index), self.lens.idx(index)) {
+            (Some(operand), Some(len)) =>
+                unsafe { Some(mem::transmute(raw::Slice { data: *operand, len: *len as uint })) },
+            _ => None
+        }
+    }
+}
+
 struct MergeOperatorState {
     name: CString,
     merge_operator: Box<MergeOperator>
@@ -389,7 +541,7 @@ extern fn partial_merge_callback(state: *mut c_void,
 /// Callback that rocksdb will execute to  the result of a merge.
 extern fn merge_operator_delete_callback(_state: *mut c_void,
                                          val: *const i8, val_len: u64) {
-    let _ = unsafe { Vec::from_raw_parts(val_len as uint, val_len as uint, val as *mut u8) };
+    let _ = unsafe { Vec::from_raw_parts(val as *mut u8, val_len as uint, val_len as uint) };
 }
 
 /// Callback that rocksdb will execute to destroy the merge operator.
@@ -526,6 +678,12 @@ impl WriteBatch {
         unsafe { rocksdb_writebatch_clear(self.write_batch) }
     }
 }
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+////// Slice Transform
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 ////// Options
